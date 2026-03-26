@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "neuroloom": {
+      "type": "http",
+      "url": "https://mcp.neuroloom.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.api_key}"
+      }
+    }
+  }
+}

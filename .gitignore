@@ -1,0 +1,10 @@
+# Test artifacts
+tests/tmp/
+*.bats.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+.claude/agent-memory/
+/.neuroloom/

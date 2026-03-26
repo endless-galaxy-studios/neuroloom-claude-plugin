@@ -1,0 +1,76 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bats:
+    name: bats (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.11.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          cd /tmp/bats-core
+          sudo ./install.sh /usr/local
+
+      - name: Install jq (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y jq
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install jq
+
+      - name: Run tests
+        run: bats tests/
+
+# ---------------------------------------------------------------------------
+# Manual QA Checklist
+# Run these steps locally before merging to main when CI is not available:
+#
+# 1. Install bats-core v1.11.0:
+#      git clone --depth 1 --branch v1.11.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+#      cd /tmp/bats-core && sudo ./install.sh /usr/local
+#
+# 2. Confirm jq is available:
+#      which jq && jq --version
+#
+# 3. Run the full test suite:
+#      bats tests/
+#    Expected: all tests pass (or platform-specific skip messages for macOS-only tests)
+#
+# 4. Run a single test file to isolate failures:
+#      bats tests/capture.bats
+#      bats tests/inject-context.bats
+#      bats tests/summarize.bats
+#      bats tests/setup.bats
+#
+# 5. Verify PATH-prepend stub isolation:
+#    - Confirm the stubs directory is cleaned up after each test (check /tmp for stray dirs)
+#    - Run tests twice back-to-back to confirm no ordering dependency
+#
+# 6. Smoke test each script manually with a real config:
+#    - scripts/setup.sh             (interactive — enter a real or test API key)
+#    - scripts/inject-context.sh    (run from a git repo directory)
+#    - echo '{"tool_name":"Bash","command":"ls"}' | scripts/capture.sh
+#    - scripts/summarize.sh
+#
+# 7. Test MCP filter:
+#    - echo '{"tool_name":"mcp__neuroloom__memory_search"}' | scripts/capture.sh
+#    Expected: exits 0, no curl call (verify with NEUROLOOM_DEBUG=1)
+#
+# 8. Test rate throttle:
+#    - Run capture.sh twice in rapid succession (< 100ms apart)
+#    Expected: second call exits 0 without curl (NEUROLOOM_DEBUG=1 shows throttle message)
+# ---------------------------------------------------------------------------

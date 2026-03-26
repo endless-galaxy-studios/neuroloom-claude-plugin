@@ -1,0 +1,21 @@
+{
+  "$schema": "https://code.claude.com/docs/en/plugins-reference#plugin-manifest-schema",
+  "name": "neuroloom",
+  "version": "0.1.0",
+  "description": "Claude Code remembers across sessions. Automatic observation capture stores every decision and context shift — searchable in every future session.",
+  "author": {
+    "name": "Endless Galaxy Studios"
+  },
+  "homepage": "https://neuroloom.dev",
+  "repository": "https://github.com/endless-galaxy-studios/neuroloom-claude-plugin",
+  "license": "MIT",
+  "keywords": ["claude-code", "persistent-memory", "session-memory", "mcp", "memory", "context", "semantic-search", "coding-agent"],
+  "userConfig": {
+    "api_key": {
+      "title": "API Key",
+      "description": "Your Neuroloom API key. Get one at https://app.neuroloom.dev/settings/api-key",
+      "type": "string",
+      "sensitive": true
+    }
+  }
+}
