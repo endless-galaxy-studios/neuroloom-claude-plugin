@@ -200,11 +200,13 @@ if [ -f "$CLAUDE_MD" ] && ! grep -q "$NL_MARKER" "$CLAUDE_MD" 2>/dev/null; then
     echo ""
     echo "Neuroloom MCP is this project's canonical knowledge system. **You MUST query Neuroloom before falling back to code exploration.**"
     echo ""
-    echo "**Before these actions, call \`memory_search\` first:**"
-    echo "- Answering \"how does X work?\", \"why did we choose Y?\", \"what's our pattern for Z?\""
-    echo "- Exploring code with Grep, Glob, or Read to understand a subsystem"
-    echo "- Dispatching subagents (include Neuroloom context in dispatch prompts)"
-    echo "- Making design decisions or architectural choices"
+    echo "**\`memory_search\` — \"What do we know about X?\"** → flat ranked list of answers."
+    echo "Call before: answering questions, exploring code, dispatching subagents, making design decisions."
+    echo ""
+    echo "**\`memory_explore\` — \"How does X connect to everything around it?\"** → topic subgraph with relationship edges."
+    echo "Call when: understanding a subsystem's context web, tracing how decisions led to implementations, preparing context for complex changes."
+    echo ""
+    echo "Rule of thumb: if you'd answer with a **list**, use \`memory_search\`. If you'd answer with a **diagram**, use \`memory_explore\`."
     echo ""
     echo "**Before editing any file, call \`memory_by_file\` first** to check for known gotchas and prior decisions."
     echo ""
@@ -255,7 +257,7 @@ fi
 # ---------------------------------------------------------------------------
 # Print tool catalog to stdout — injected into the conversation so the model
 # knows what each deferred Neuroloom tool does (names alone aren't enough).
-# memory_search is always loaded via _meta; everything else is deferred.
+# memory_search and memory_explore are always loaded via _meta; everything else is deferred.
 # ---------------------------------------------------------------------------
 cat <<'CATALOG'
 <system-reminder>
@@ -263,7 +265,8 @@ cat <<'CATALOG'
 
 | Tool | Use when |
 |------|----------|
-| memory_search | **Always loaded** — query before exploring code, answering architecture questions, or making design decisions |
+| memory_search | **Always loaded** — "What do we know about X?" → flat ranked answers. Use before exploring code, answering questions, or making decisions |
+| memory_explore | **Always loaded** — "How does X connect to everything around it?" → topic subgraph with edges. Use when context, relationships, and decision chains matter |
 | memory_get_detail | Need the full narrative, relationships, and source files behind a search result |
 | memory_get_timeline | Catching up on recent work — what was learned or decided in the last N days |
 | memory_get_index | Browsing what knowledge exists — lightweight titles-only overview |

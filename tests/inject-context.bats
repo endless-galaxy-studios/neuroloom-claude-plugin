@@ -131,6 +131,7 @@ STUB
 
   # Core tool names must be present in the catalog table
   [[ "$output" == *"memory_search"* ]]
+  [[ "$output" == *"memory_explore"* ]]
   [[ "$output" == *"memory_store"* ]]
   [[ "$output" == *"memory_get_detail"* ]]
   [[ "$output" == *"session_end"* ]]

@@ -50,7 +50,7 @@ Using Cursor or Windsurf? See the [MCP Integration guide](https://neuroloom.dev/
 
 - Your past decisions and patterns are available at every session start
 - Tool use from previous sessions surfaces as searchable context — nothing is lost between sessions
-- Claude queries Neuroloom automatically via MCP tools (`memory_search`, `memory_store`, etc.)
+- Claude queries Neuroloom automatically via MCP tools (`memory_search`, `memory_explore`, `memory_store`, etc.)
 - `/neuroloom:status` — check session health, buffer depth, and MCP connection
 
 ---
