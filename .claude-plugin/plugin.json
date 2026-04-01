@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/docs/en/plugins-reference#plugin-manifest-schema",
   "name": "neuroloom",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Claude Code remembers across sessions. Automatic observation capture stores every decision and context shift — searchable in every future session.",
   "author": {
     "name": "Endless Galaxy Studios"

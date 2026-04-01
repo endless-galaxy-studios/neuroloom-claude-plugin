@@ -200,13 +200,13 @@ if [ -f "$CLAUDE_MD" ] && ! grep -q "$NL_MARKER" "$CLAUDE_MD" 2>/dev/null; then
     echo ""
     echo "Neuroloom MCP is this project's canonical knowledge system. **You MUST query Neuroloom before falling back to code exploration.**"
     echo ""
-    echo "**\`memory_search\` — \"What do we know about X?\"** → flat ranked list of answers."
-    echo "Call before: answering questions, exploring code, dispatching subagents, making design decisions."
+    echo "**\`memory_search\` — specific lookups.** \"What's our pattern for X?\", \"Why did we choose Y?\", \"What do we know about Z?\""
+    echo "Call before: answering targeted questions, looking up a decision, checking a convention, dispatching subagents."
     echo ""
-    echo "**\`memory_explore\` — \"How does X connect to everything around it?\"** → topic subgraph with relationship edges."
-    echo "Call when: understanding a subsystem's context web, tracing how decisions led to implementations, preparing context for complex changes."
+    echo "**\`memory_explore\` — understanding a topic area.** \"How does our authentication work?\", \"Tell me about our integrations\", \"What's the full picture on search?\""
+    echo "Call when: you need the big picture on a subsystem, you want to see how decisions led to implementations, or you're preparing context for a complex change. Returns related memories AND the edges between them."
     echo ""
-    echo "Rule of thumb: if you'd answer with a **list**, use \`memory_search\`. If you'd answer with a **diagram**, use \`memory_explore\`."
+    echo "**When in doubt, use \`memory_explore\`** — more context is always better than less."
     echo ""
     echo "**Before editing any file, call \`memory_by_file\` first** to check for known gotchas and prior decisions."
     echo ""
@@ -255,8 +255,8 @@ cat <<'CATALOG'
 
 | Tool | Use when |
 |------|----------|
-| memory_search | **Always loaded** — "What do we know about X?" → flat ranked answers. Use before exploring code, answering questions, or making decisions |
-| memory_explore | **Always loaded** — "How does X connect to everything around it?" → topic subgraph with edges. Use when context, relationships, and decision chains matter |
+| memory_search | **Always loaded** — specific lookups: "What's our pattern for X?", "Why did we choose Y?" |
+| memory_explore | **Always loaded** — topic areas: "How does our auth work?", "Tell me about our integrations" — returns memories AND their relationships |
 | memory_get_detail | Need the full narrative, relationships, and source files behind a search result |
 | memory_get_timeline | Catching up on recent work — what was learned or decided in the last N days |
 | memory_get_index | Browsing what knowledge exists — lightweight titles-only overview |
