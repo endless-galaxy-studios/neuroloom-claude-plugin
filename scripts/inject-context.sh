@@ -218,23 +218,13 @@ if [ -f "$CLAUDE_MD" ] && ! grep -q "$NL_MARKER" "$CLAUDE_MD" 2>/dev/null; then
   } > "$nl_block"
 
   # Insert near the top of CLAUDE.md for maximum gravity.
-  # Strategy: insert after the first "## Workflow" header if present,
-  # otherwise after the first "---" separator, otherwise append.
+  # Strategy: insert after the first "## " header, otherwise append.
   inserted=false
 
-  if grep -qn "^## Workflow" "$CLAUDE_MD" 2>/dev/null; then
-    # Insert after the ## Workflow line
-    insert_line="$(grep -n "^## Workflow" "$CLAUDE_MD" | head -1 | cut -d: -f1)"
-    debug "Inserting directive after ## Workflow (line $insert_line)"
-    head -n "$insert_line" "$CLAUDE_MD" > "${CLAUDE_MD}.tmp"
-    cat "$nl_block" >> "${CLAUDE_MD}.tmp"
-    tail -n +"$((insert_line + 1))" "$CLAUDE_MD" >> "${CLAUDE_MD}.tmp"
-    mv "${CLAUDE_MD}.tmp" "$CLAUDE_MD"
-    inserted=true
-  elif grep -qn "^---$" "$CLAUDE_MD" 2>/dev/null; then
-    # Insert after the first --- separator
-    insert_line="$(grep -n "^---$" "$CLAUDE_MD" | head -1 | cut -d: -f1)"
-    debug "Inserting directive after first --- (line $insert_line)"
+  if grep -qn "^## " "$CLAUDE_MD" 2>/dev/null; then
+    # Insert after the first ## header
+    insert_line="$(grep -n "^## " "$CLAUDE_MD" | head -1 | cut -d: -f1)"
+    debug "Inserting directive after first ## header (line $insert_line)"
     head -n "$insert_line" "$CLAUDE_MD" > "${CLAUDE_MD}.tmp"
     cat "$nl_block" >> "${CLAUDE_MD}.tmp"
     tail -n +"$((insert_line + 1))" "$CLAUDE_MD" >> "${CLAUDE_MD}.tmp"
