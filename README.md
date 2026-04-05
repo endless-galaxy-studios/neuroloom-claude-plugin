@@ -16,6 +16,7 @@ Using Cursor or Windsurf? See the [MCP Integration guide](https://neuroloom.dev/
   - Linux (Debian/Ubuntu): `apt install jq`
   - Other: https://jqlang.org/download/
 - **`openssl`** — used for portable sha256 hashing, standard on macOS and Linux
+- **`python3`** >= 3.12 (required for code graph sync only, not needed for session capture)
 - **Claude Code** with plugin support
 
 ---
@@ -139,6 +140,45 @@ Source-order gaps have been resolved. With `trace.sh` sourced immediately after 
 ### Performance
 
 When `NEUROLOOM_TRACE` is unset, overhead is zero — the trace library guard returns immediately. When enabled, tracing adds ~1–2ms per traced exit.
+
+---
+
+## Code Graph Sync
+
+When you edit `.ts`, `.tsx`, or `.py` files, the plugin automatically parses each file's structure — functions, classes, and imports — and syncs it to the Neuroloom API in the background. No manual `code_sync` calls are needed. This is independent from session capture: both hooks fire on tool use, but they serve different purposes, and disabling one does not affect the other.
+
+### Enabling code graph sync
+
+Install the MCP package with the `codegraph` extra:
+
+```bash
+uv pip install 'neuroloom-mcp[codegraph]'
+# or, without uv:
+pip install 'neuroloom-mcp[codegraph]'
+```
+
+> **Note:** Do not use `uv add` — that modifies your project's `pyproject.toml`. Use `uv pip install` instead. If you installed into a project venv, ensure the venv is activated when Claude Code launches, or use `uv run python` instead of `python3`.
+
+If the `codegraph` dependency is absent, the hook exits silently — no errors, no warnings. With `NEUROLOOM_DEBUG=1`, a one-line message identifies what is missing.
+
+### Opting out
+
+Set `NEUROLOOM_CODE_GRAPH_SYNC` to `false` or `0` to disable code graph sync entirely:
+
+```bash
+export NEUROLOOM_CODE_GRAPH_SYNC=false  # disable code graph sync
+```
+
+Session capture continues to operate normally when code graph sync is disabled.
+
+### Verifying sync behavior
+
+Two environment variables expose what the hook is doing:
+
+- **`NEUROLOOM_TRACE=true`** — shows hook-level decision tracing (debounced, extension_filtered, disabled_by_config, etc.)
+- **`NEUROLOOM_DEBUG=1`** — shows API response inspection from the Python parsing helper
+
+Neither flag is needed for normal use.
 
 ---
 

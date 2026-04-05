@@ -19,6 +19,15 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture.sh"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/code-graph-sync.sh"
+          }
+        ]
       }
     ],
     "Stop": [
