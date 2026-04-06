@@ -17,11 +17,34 @@ Using Cursor or Windsurf? See the [MCP Integration guide](https://neuroloom.dev/
   - Other: https://jqlang.org/download/
 - **`openssl`** — used for portable sha256 hashing, standard on macOS and Linux
 - **`python3`** >= 3.12 (required for code graph sync only, not needed for session capture)
+- **`neuroloom-codeweaver`** — required for code graph sync. Install with:
+  ```
+  pip install neuroloom-codeweaver
+  ```
 - **Claude Code** with plugin support
 
 ---
 
-## Quick Install
+## Install via pip (recommended)
+
+```sh
+pip install neuroloom-mcp
+neuroloom-mcp install-plugin
+```
+
+Then restart Claude Code. The plugin and MCP server are configured together.
+Set your API key with `/plugins configure neuroloom` in Claude Code.
+
+To upgrade:
+
+```sh
+pip install --upgrade neuroloom-mcp
+neuroloom-mcp install-plugin --force
+```
+
+---
+
+## Install from Claude Code Marketplace
 
 1. Add the Endless Galaxy Studios marketplace:
    ```
@@ -149,17 +172,17 @@ When you edit `.ts`, `.tsx`, or `.py` files, the plugin automatically parses eac
 
 ### Enabling code graph sync
 
-Install the MCP package with the `codegraph` extra:
+Install the `neuroloom-codeweaver` package:
 
 ```bash
-uv pip install 'neuroloom-mcp[codegraph]'
+uv pip install neuroloom-codeweaver
 # or, without uv:
-pip install 'neuroloom-mcp[codegraph]'
+pip install neuroloom-codeweaver
 ```
 
 > **Note:** Do not use `uv add` — that modifies your project's `pyproject.toml`. Use `uv pip install` instead. If you installed into a project venv, ensure the venv is activated when Claude Code launches, or use `uv run python` instead of `python3`.
 
-If the `codegraph` dependency is absent, the hook exits silently — no errors, no warnings. With `NEUROLOOM_DEBUG=1`, a one-line message identifies what is missing.
+If `neuroloom-codeweaver` is absent, the hook exits silently — no errors, no warnings. With `NEUROLOOM_DEBUG=1`, a one-line message identifies what is missing.
 
 ### Opting out
 

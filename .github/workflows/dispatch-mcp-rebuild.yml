@@ -1,0 +1,32 @@
+name: Dispatch MCP rebuild on plugin release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    name: Notify neuroloom to rebuild MCP package
+    runs-on: ubuntu-latest
+    permissions: {}  # uses PAT, not GITHUB_TOKEN
+
+    steps:
+      - name: Dispatch plugin-release event
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.NEUROLOOM_DISPATCH_TOKEN }}" \
+            https://api.github.com/repos/endless-galaxy-studios/neuroloom/dispatches \
+            -d '{
+              "event_type": "plugin-release",
+              "client_payload": {
+                "sha": "${{ github.event.release.target_commitish }}",
+                "tag": "${{ github.event.release.tag_name }}",
+                "plugin_version": "${{ github.event.release.tag_name }}"
+              }
+            }'
+          echo "Dispatched plugin-release to neuroloom monorepo"
+          echo "  SHA: ${{ github.event.release.target_commitish }}"
+          echo "  Tag: ${{ github.event.release.tag_name }}"

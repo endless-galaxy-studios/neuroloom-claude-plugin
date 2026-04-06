@@ -3,7 +3,7 @@
 
 Invoked by code-graph-sync.sh in a background subshell after a Write/Edit tool fires.
 Uses stdlib-only HTTP (urllib.request) so the plugin has zero Python dependencies
-beyond the optional neuroloom-mcp[codegraph] extra.
+beyond the optional neuroloom-codeweaver package.
 
 Exit codes:
   0  — success or any non-fatal error (parse failure, network error, missing deps, etc.)
@@ -33,23 +33,15 @@ if not api_key:
 debug = os.environ.get("NEUROLOOM_DEBUG") == "1"
 
 # ---------------------------------------------------------------------------
-# Optional dependency guard — two distinct failure modes
+# Optional dependency guard
 # ---------------------------------------------------------------------------
 try:
-    import neuroloom_mcp  # noqa: F401
+    from codeweaver import parse_files
 except ImportError:
     print(
-        "[neuroloom] code-graph sync disabled: install neuroloom-mcp[codegraph] to enable",
-        file=sys.stderr,
-    )
-    sys.exit(0)
-
-try:
-    from neuroloom_mcp.services.code_graph_parser import parse_files
-except ImportError:
-    print(
-        "[neuroloom] code-graph sync disabled: neuroloom-mcp is installed but missing "
-        "the codegraph extra. Run: pip install 'neuroloom-mcp[codegraph]'",
+        "[neuroloom] code-graph sync disabled: install neuroloom-codeweaver to enable. "
+        "Run: pip install neuroloom-codeweaver "
+        "(ensure it's installed in the Python environment used by Claude Code)",
         file=sys.stderr,
     )
     sys.exit(0)
