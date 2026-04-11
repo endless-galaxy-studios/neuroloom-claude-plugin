@@ -241,9 +241,41 @@ Stored [N]/[target] memories...
 
 Where `[target]` is your planned total count (established before you begin storing).
 
+---
+
+## Phase 4 — Code Graph Seeding
+
+After the last `memory_store` call in Phase 3, run the code graph seed step.
+
+**Step 1: Announce.**
+
+Print:
+```
+Seeding code graph...
+```
+
+**Step 2: Run the seed script.**
+
+Use the Bash tool to invoke:
+```
+timeout 120 ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python ${CLAUDE_PLUGIN_ROOT}/scripts/seed_code_graph.py --workspace-root "{cwd}"
+```
+
+Replace `{cwd}` with the actual working directory path. Use `${CLAUDE_PLUGIN_ROOT}` literally — do not use Glob to discover the script path.
+
+Capture the single structured status line printed to stdout.
+
+**Step 3: Interpret the result.**
+
+- Exit code 0, status line begins with `code-graph: seeded` → success. Record the status line for the Final Summary.
+- Exit code 0, status line begins with `code-graph: skipped` → graceful skip. Do not include a code graph line in the Final Summary and do not warn the user.
+- Non-zero exit code, or status line begins with `code-graph: failed` → record the status line for the Final Summary and continue to Final Summary. Do not abort init.
+
+---
+
 ### Final Summary
 
-After all memories are stored, print exactly this format:
+After Phase 4 completes, print exactly this format:
 
 ```
 Init complete.
@@ -251,9 +283,12 @@ Init complete.
     Project overview: 1
     Module summaries: [N]
     Key file memories: [N]
+  Code graph: [seeded (N files, M symbols) | failed — [error]]
   Coverage: [bulleted list of top-level modules/services covered]
   Semantic search will be available shortly as embeddings are computed in the background.
   Try asking: "How does [primary subsystem] work?"
 ```
+
+The `Code graph:` line is ONLY included when seeding was attempted and not skipped — that is, when codeweaver was installed and the script ran. If the status was `skipped`, omit that line entirely. When the status was `failed`, show the reason extracted from the status line after the dash (e.g., `failed — HTTP 500`).
 
 Do NOT print the literal text `[primary subsystem]`. Replace it with the actual name of the most important or complex subsystem you identified during the crawl — make the example query actually useful for this specific codebase. The "Try asking" prompt is how users invoke memory search in Claude Code — by asking a natural language question.
