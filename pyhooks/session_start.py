@@ -70,16 +70,17 @@ _END_SESSION_JOIN_TIMEOUT = 0.090
 # Timeout (seconds) for the HTTP call inside the "end stale session" thread.
 # The thread is daemon=False so it can outlive the join; give it a longer
 # budget than the join timeout so the request actually has a chance to complete.
-_END_SESSION_HTTP_TIMEOUT = 3.0
+_END_SESSION_HTTP_TIMEOUT = 5.0
 
-# Timeout (seconds) for the start-session API call.
-_START_SESSION_TIMEOUT = 5.0
+# Timeout (seconds) for the start-session API call.  Blocking (not threaded),
+# so kept tight to avoid adding latency to hook startup.
+_START_SESSION_TIMEOUT = 3.0
 
 # Timeout (seconds) for the event-buffer flush API call.
-_FLUSH_TIMEOUT = 10.0
+_FLUSH_TIMEOUT = 5.0
 
 # Timeout (seconds) for the PyPI version check.
-_PYPI_TIMEOUT = 3.0
+_PYPI_TIMEOUT = 5.0
 
 # Marker used to detect an already-injected CLAUDE.md block.
 _CLAUDEMD_MARKER = "<!-- neuroloom:memory-first -->"
@@ -349,12 +350,15 @@ def _prune_traces(conn: sqlite3.Connection) -> None:
 
 
 def _flush_event_buffer(
-    conn: sqlite3.Connection,
+    db_path: Path,
     api_base: str,
     api_key: str,
 ) -> None:
     """
     Step 7 — flush buffered observation events to the API.
+
+    Opens its own SQLite connection so it is safe to run in a background thread
+    (SQLite connections must not be shared across threads).
 
     If the buffer has grown past _EVENT_BUFFER_MAX rows, trim it to
     _EVENT_BUFFER_TRIM rows first (dropping the oldest entries) to prevent
@@ -363,45 +367,59 @@ def _flush_event_buffer(
     Rows are sent in a single batch POST.  On success they are deleted from the
     buffer.  On failure they are left in place for the next startup to retry.
     """
-    count: int = conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _db.open_db(db_path)
+        if conn is None:
+            return
 
-    if count > _EVENT_BUFFER_MAX:
-        # Delete the oldest rows, keeping only the most recent _EVENT_BUFFER_TRIM.
-        conn.execute(
-            "DELETE FROM event_buffer WHERE id NOT IN ("
-            "SELECT id FROM event_buffer ORDER BY id DESC LIMIT " + str(_EVENT_BUFFER_TRIM) + ")"
-        )
-        conn.commit()
+        count: int = conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
 
-    rows = conn.execute("SELECT id, payload FROM event_buffer ORDER BY id ASC").fetchall()
+        if count > _EVENT_BUFFER_MAX:
+            # Delete the oldest rows, keeping only the most recent _EVENT_BUFFER_TRIM.
+            conn.execute(
+                "DELETE FROM event_buffer WHERE id NOT IN ("
+                "SELECT id FROM event_buffer ORDER BY id DESC LIMIT " + str(_EVENT_BUFFER_TRIM) + ")"
+            )
+            conn.commit()
 
-    if not rows:
-        return
+        rows = conn.execute("SELECT id, payload FROM event_buffer ORDER BY id ASC").fetchall()
 
-    observations: list[object] = []
-    row_ids: list[int] = []
+        if not rows:
+            return
 
-    for row in rows:
-        row_ids.append(row["id"])
-        try:
-            observations.append(json.loads(row["payload"]))
-        except Exception:
-            # Malformed payload — skip it but still delete the row on success
-            # so it does not block future flushes.
-            observations.append({"raw": row["payload"]})
+        observations: list[object] = []
+        row_ids: list[int] = []
 
-    payload = json.dumps({"observations": observations}).encode("utf-8")
-    url = f"{api_base}/api/v1/observations/batch"
-    result = _http.post_json(url, _auth_headers(api_key), payload, timeout=_FLUSH_TIMEOUT)
+        for row in rows:
+            row_ids.append(row["id"])
+            try:
+                observations.append(json.loads(row["payload"]))
+            except Exception:
+                # Malformed payload — skip it but still delete the row on success
+                # so it does not block future flushes.
+                observations.append({"raw": row["payload"]})
 
-    if result is not None and 200 <= result[0] < 300:
-        # Delete only the rows we successfully sent.
-        placeholders = ",".join("?" * len(row_ids))
-        conn.execute(
-            "DELETE FROM event_buffer WHERE id IN (" + placeholders + ")",
-            row_ids,
-        )
-        conn.commit()
+        payload = json.dumps({"observations": observations}).encode("utf-8")
+        url = f"{api_base}/api/v1/observations/batch"
+        result = _http.post_json(url, _auth_headers(api_key), payload, timeout=_FLUSH_TIMEOUT)
+
+        if result is not None and 200 <= result[0] < 300:
+            # Delete only the rows we successfully sent.
+            placeholders = ",".join("?" * len(row_ids))
+            conn.execute(
+                "DELETE FROM event_buffer WHERE id IN (" + placeholders + ")",
+                row_ids,
+            )
+            conn.commit()
+    except Exception:
+        pass  # never crash — hook design constraint
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _ensure_gitignore(project_root: str) -> None:
@@ -493,8 +511,15 @@ def main() -> None:
             _prune_traces(conn)
 
         # Step 7 — flush event buffer.
-        if conn is not None:
-            _flush_event_buffer(conn, cfg.api_base, cfg.api_key)
+        # Flush buffered observations in background — thread outlives the 90 ms join
+        # so large batches don't block session startup.
+        flush_thread = threading.Thread(
+            target=_flush_event_buffer,
+            args=(cfg.state_db_path, cfg.api_base, cfg.api_key),
+            daemon=False,
+        )
+        flush_thread.start()
+        flush_thread.join(timeout=0.090)
 
         # Step 8 — .gitignore management.
         _ensure_gitignore(cwd)

@@ -113,10 +113,12 @@ def _run_codeweaver_sync(
     Returns
     -------
     0
-        Success, or any non-fatal failure (parse error, network error,
-        codeweaver unavailable).
+        Success.
     42
         HTTP 429 Too Many Requests — signals the caller to increase backoff.
+    negative int
+        Failure: ``-1`` for network/timeout errors, ``-status_code`` for
+        HTTP errors (e.g. ``-400``, ``-500``).
     """
     try:
         from codeweaver import parse_files  # type: ignore[import-untyped,unused-ignore]
@@ -149,9 +151,9 @@ def _run_codeweaver_sync(
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             return 42
-        return 0
+        return -exc.code  # e.g., -400, -500 — distinguishable from success
     except Exception:
-        return 0
+        return -1  # network/timeout failure
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +204,11 @@ def _background_sync(
             )
             bg_conn.commit()
             _trace.write(bg_conn, _SCRIPT, "sync_rate_limited", detail="backoff_doubled")
+        elif exit_code < 0:
+            _trace.write(
+                bg_conn, _SCRIPT, "sync_failed",
+                detail=f"files={len(unique_paths)} exit_code={exit_code}",
+            )
         else:
             bg_conn.execute(
                 "UPDATE debounce SET backoff_ms = MAX(backoff_ms / 2, 2000), last_sync_ms = ? WHERE workspace_key = ?",

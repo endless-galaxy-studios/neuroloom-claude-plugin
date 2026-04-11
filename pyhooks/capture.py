@@ -46,10 +46,10 @@ _RATE_LIMIT_MS = 100
 _BUFFER_MAX = 10_000
 _BUFFER_TRIM_TARGET = 8_000
 
-# HTTP timeout budget for the background POST (seconds).  We join with 90 ms so
-# the timeout must be strictly shorter to give the thread time to handle a
-# response before the join deadline expires.
-_HTTP_TIMEOUT = 0.085
+# HTTP timeout for the background POST (seconds).  The background thread is
+# daemon=False and outlives the 90 ms join — this timeout bounds the network
+# call itself, not the hook latency.
+_HTTP_TIMEOUT = 5.0
 
 
 # ---------------------------------------------------------------------------
