@@ -2,9 +2,14 @@
 tests/tmp/
 *.bats.swp
 
+# Plugin-local virtualenv (auto-bootstrapped on first use)
+.venv/
+
 # OS files
 .DS_Store
 Thumbs.db
 
 .claude/agent-memory/
 /.neuroloom/
+__pycache__/
+*.egg-info/

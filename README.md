@@ -17,10 +17,6 @@ Using Cursor or Windsurf? See the [MCP Integration guide](https://neuroloom.dev/
   - Other: https://jqlang.org/download/
 - **`openssl`** — used for portable sha256 hashing, standard on macOS and Linux
 - **`python3`** >= 3.12 (required for code graph sync only, not needed for session capture)
-- **`neuroloom-codeweaver`** — required for code graph sync. Install with:
-  ```
-  pip install neuroloom-codeweaver
-  ```
 - **Claude Code** with plugin support
 
 ---
@@ -172,17 +168,9 @@ When you edit `.ts`, `.tsx`, or `.py` files, the plugin automatically parses eac
 
 ### Enabling code graph sync
 
-Install the `neuroloom-codeweaver` package:
+Code graph sync is enabled automatically — no manual installation required. On first use, the plugin bootstraps a local `.venv` inside the plugin directory and installs the `tree-sitter` native dependencies into it. This happens in the background and takes 10–30 seconds on a cold start. Subsequent runs use the cached `.venv` and add no overhead.
 
-```bash
-uv pip install neuroloom-codeweaver
-# or, without uv:
-pip install neuroloom-codeweaver
-```
-
-> **Note:** Do not use `uv add` — that modifies your project's `pyproject.toml`. Use `uv pip install` instead. If you installed into a project venv, ensure the venv is activated when Claude Code launches, or use `uv run python` instead of `python3`.
-
-If `neuroloom-codeweaver` is absent, the hook exits silently — no errors, no warnings. With `NEUROLOOM_DEBUG=1`, a one-line message identifies what is missing.
+If the bootstrap fails (e.g. no network access, Python unavailable), the hook exits silently and code graph sync is disabled for that run. Set `NEUROLOOM_DEBUG=1` to see diagnostic output.
 
 ### Opting out
 

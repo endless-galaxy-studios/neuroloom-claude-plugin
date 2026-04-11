@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/preload-context.sh"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.preload_context"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/preload-context.sh"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.preload_context"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/inject-context.sh"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.session_start"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture.sh"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.capture"
           }
         ]
       },
@@ -45,17 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/code-graph-sync.sh"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/summarize.sh"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.code_graph_sync"
           }
         ]
       }
