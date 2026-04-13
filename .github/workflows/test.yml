@@ -68,9 +68,9 @@ jobs:
 #
 # 7. Test MCP filter:
 #    - echo '{"tool_name":"mcp__neuroloom__memory_search"}' | scripts/capture.sh
-#    Expected: exits 0, no curl call (verify with NEUROLOOM_DEBUG=1)
+#    Expected: exits 0, no curl call
 #
 # 8. Test rate throttle:
 #    - Run capture.sh twice in rapid succession (< 100ms apart)
-#    Expected: second call exits 0 without curl (NEUROLOOM_DEBUG=1 shows throttle message)
+#    Expected: second call exits 0 without curl
 # ---------------------------------------------------------------------------

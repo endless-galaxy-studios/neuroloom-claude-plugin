@@ -39,13 +39,19 @@ if __name__ == "__main__":
     module = sys.argv[1]
     args = [str(venv_py), "-m", module] + sys.argv[2:]
 
+    # Add the plugin root to PYTHONPATH so `python -m pyhooks.*` resolves
+    # without needing pyhooks installed as a package in the venv.
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(PLUGIN_ROOT) + (os.pathsep + existing if existing else "")
+
     if sys.platform == "win32":
         import subprocess
 
-        result = subprocess.run(args, env=os.environ)
+        result = subprocess.run(args, env=env)
         sys.exit(result.returncode or 0)
     else:
         try:
-            os.execv(str(venv_py), args)
+            os.execve(str(venv_py), args, env)
         except OSError:
             sys.exit(0)

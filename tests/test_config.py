@@ -20,13 +20,11 @@ class TestConfigLoad:
         """``load()`` populates all fields when env vars are set."""
         monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "my-secret-key")
         monkeypatch.setenv("NEUROLOOM_API_BASE", "https://custom.api.example.com")
-        monkeypatch.setenv("NEUROLOOM_DEBUG", "1")
 
         cfg = _config_mod.load()
 
         assert cfg.api_key == "my-secret-key"
         assert cfg.api_base == "https://custom.api.example.com"
-        assert cfg.debug is True
         assert isinstance(cfg.state_db_path, Path)
 
     def test_load_returns_defaults_when_env_vars_absent(
@@ -35,13 +33,11 @@ class TestConfigLoad:
         """``load()`` never raises and returns safe defaults for missing vars."""
         monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
         monkeypatch.delenv("NEUROLOOM_API_BASE", raising=False)
-        monkeypatch.delenv("NEUROLOOM_DEBUG", raising=False)
 
         cfg = _config_mod.load()
 
         assert cfg.api_key == ""
         assert cfg.api_base == "https://api.neuroloom.dev"
-        assert cfg.debug is False
         assert isinstance(cfg.state_db_path, Path)
 
     def test_state_db_path_uses_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,18 +48,6 @@ class TestConfigLoad:
         cfg = _config_mod.load()
 
         assert cfg.state_db_path == tmp_path / ".neuroloom.db"
-
-    def test_debug_true_for_string_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``NEUROLOOM_DEBUG=true`` (case-insensitive) enables debug mode."""
-        monkeypatch.setenv("NEUROLOOM_DEBUG", "true")
-        cfg = _config_mod.load()
-        assert cfg.debug is True
-
-    def test_debug_false_for_random_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``NEUROLOOM_DEBUG=yes`` is not a recognised truthy value."""
-        monkeypatch.setenv("NEUROLOOM_DEBUG", "yes")
-        cfg = _config_mod.load()
-        assert cfg.debug is False
 
     def test_api_key_stored_on_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The API key is accessible via the ``api_key`` field (used by callers to
@@ -87,9 +71,7 @@ class TestConfigLoad:
         Null bytes cannot be set in OS environment variables (the OS rejects them
         at the system-call level), so we test with non-null garbage values instead.
         """
-        monkeypatch.setenv("NEUROLOOM_DEBUG", "garbage-value-that-is-not-1-or-true")
         monkeypatch.setenv("NEUROLOOM_API_BASE", "")
         # Should not raise
         cfg = _config_mod.load()
         assert cfg is not None
-        assert cfg.debug is False

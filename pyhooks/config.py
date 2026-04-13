@@ -13,10 +13,6 @@ CLAUDE_PLUGIN_OPTION_API_KEY
 NEUROLOOM_API_BASE
     Base URL for the Neuroloom REST API.
     Defaults to ``https://api.neuroloom.dev``.
-
-NEUROLOOM_DEBUG
-    Set to ``"1"`` or ``"true"`` (case-insensitive) to enable debug logging.
-    Any other value (including unset) is treated as disabled.
 """
 
 import os
@@ -29,7 +25,6 @@ class Config:
     api_key: str
     api_base: str
     state_db_path: Path
-    debug: bool
 
 
 def load() -> Config:
@@ -37,12 +32,9 @@ def load() -> Config:
     api_key = os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "")
     api_base = os.environ.get("NEUROLOOM_API_BASE", "https://api.neuroloom.dev")
     state_db_path = Path(os.getcwd()) / ".neuroloom.db"
-    debug_raw = os.environ.get("NEUROLOOM_DEBUG", "").strip().lower()
-    debug = debug_raw in ("1", "true")
 
     return Config(
         api_key=api_key,
         api_base=api_base,
         state_db_path=state_db_path,
-        debug=debug,
     )

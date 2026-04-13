@@ -17,11 +17,6 @@ Design constraints
 - ``BEGIN IMMEDIATE`` for the drain step — not ``with conn:`` — so the
   write lock is acquired up front and no other process can slip in a
   ``DELETE`` between our ``SELECT`` and our own ``DELETE``.
-
-Environment variables
----------------------
-NEUROLOOM_CODE_GRAPH_SYNC
-    Set to ``"0"`` to disable this hook entirely.
 """
 
 from __future__ import annotations
@@ -235,11 +230,7 @@ def _background_sync(
 def main() -> None:
     """PostToolUse hook: queue the edited file and trigger a debounced sync."""
 
-    # 1. Opt-out check
-    if os.environ.get("NEUROLOOM_CODE_GRAPH_SYNC") == "0":
-        sys.exit(0)
-
-    # 2. Load config
+    # 1. Load config
     config = _config.load()
     if not config.api_key:
         sys.exit(0)

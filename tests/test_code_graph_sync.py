@@ -37,15 +37,9 @@ def _run_cgs(
     db_path: Path,
     file_path: str,
     api_key: str = "test-key",
-    sync_enabled: bool = True,
 ) -> None:
     """Run ``code_graph_sync.main()`` with a controlled environment."""
     monkeypatch.chdir(tmp_path)
-    if not sync_enabled:
-        monkeypatch.setenv("NEUROLOOM_CODE_GRAPH_SYNC", "0")
-    else:
-        monkeypatch.delenv("NEUROLOOM_CODE_GRAPH_SYNC", raising=False)
-
     stdin_data = json.dumps({"tool_input": {"file_path": file_path}})
 
     with (
@@ -452,20 +446,6 @@ class TestAdaptiveBackoff:
             conn.close()
 
 
-class TestOptOut:
-    """Setting ``NEUROLOOM_CODE_GRAPH_SYNC=0`` disables the hook entirely."""
-
-    def test_disabled_when_env_is_zero(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db_path = tmp_path / ".neuroloom.db"
-        _run_cgs(
-            monkeypatch,
-            tmp_path,
-            db_path,
-            str(tmp_path / "main.py"),
-            sync_enabled=False,
-        )
 
         # DB should not have been created (or if it was, no debounce rows)
         if db_path.exists():
