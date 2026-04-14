@@ -8,7 +8,10 @@ never crash due to misconfiguration.
 Environment variables
 ---------------------
 CLAUDE_PLUGIN_OPTION_API_KEY
-    Neuroloom API key.  Defaults to an empty string (unauthenticated).
+    Neuroloom API key (checked first, set by Claude Code plugin system).
+
+NEUROLOOM_API_KEY
+    Neuroloom API key fallback (for manual configuration or CI).
 
 NEUROLOOM_API_BASE
     Base URL for the Neuroloom REST API.
@@ -29,7 +32,12 @@ class Config:
 
 def load() -> Config:
     """Read configuration from the environment, returning safe defaults for any missing value."""
-    api_key = os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "")
+    # Check CLAUDE_PLUGIN_OPTION_API_KEY first (set by Claude Code plugin system),
+    # fall back to NEUROLOOM_API_KEY (manual config / CI environments)
+    api_key = (
+        os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "").strip()
+        or os.environ.get("NEUROLOOM_API_KEY", "").strip()
+    )
     api_base = os.environ.get("NEUROLOOM_API_BASE", "https://api.neuroloom.dev")
     state_db_path = Path(os.getcwd()) / ".neuroloom.db"
 

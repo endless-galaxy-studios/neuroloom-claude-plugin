@@ -32,6 +32,7 @@ class TestConfigLoad:
     ) -> None:
         """``load()`` never raises and returns safe defaults for missing vars."""
         monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.delenv("NEUROLOOM_API_KEY", raising=False)
         monkeypatch.delenv("NEUROLOOM_API_BASE", raising=False)
 
         cfg = _config_mod.load()
@@ -40,10 +41,33 @@ class TestConfigLoad:
         assert cfg.api_base == "https://api.neuroloom.dev"
         assert isinstance(cfg.state_db_path, Path)
 
+    def test_api_key_falls_back_to_neuroloom_api_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``api_key`` falls back to NEUROLOOM_API_KEY when CLAUDE_PLUGIN_OPTION_API_KEY is not set."""
+        monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.setenv("NEUROLOOM_API_KEY", "fallback-key")
+
+        cfg = _config_mod.load()
+
+        assert cfg.api_key == "fallback-key"
+
+    def test_claude_plugin_option_takes_precedence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLAUDE_PLUGIN_OPTION_API_KEY takes precedence over NEUROLOOM_API_KEY."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "plugin-key")
+        monkeypatch.setenv("NEUROLOOM_API_KEY", "fallback-key")
+
+        cfg = _config_mod.load()
+
+        assert cfg.api_key == "plugin-key"
+
     def test_state_db_path_uses_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """``state_db_path`` is constructed from the process working directory."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.delenv("NEUROLOOM_API_KEY", raising=False)
 
         cfg = _config_mod.load()
 
