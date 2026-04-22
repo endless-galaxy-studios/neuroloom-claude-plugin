@@ -104,7 +104,7 @@ class TestSessionStartPerformance:
                 return_value=(200, b'{"session_id":"sess-ok"}'),
             ),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
-            patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             start = time.perf_counter()
             _ss_mod.main()

@@ -8,10 +8,11 @@ injection, trace pruning, and session start failure.
 
 import io
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -79,8 +80,8 @@ def _run_session_start(
         patch("pyhooks.session_start._db.open_db") as mock_open_db,
         patch("pyhooks.session_start._http.post_json", side_effect=_fake_post),
         patch("pyhooks.session_start.sys.stdout", output),
-        # Prevent the codeweaver update-check thread from making real network calls
-        patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+        # Prevent the codeweaver bootstrap/upgrade thread from making real network calls
+        patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
     ):
         import pyhooks.config as _config_mod
 
@@ -195,7 +196,7 @@ class TestStaleSession:
             patch("pyhooks.session_start._db.open_db") as mock_open_db,
             patch("pyhooks.session_start._http.post_json", side_effect=_fake_post),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
-            patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -248,7 +249,7 @@ class TestCorruptStaleSession:
             patch("pyhooks.session_start._db.open_db") as mock_open_db,
             patch("pyhooks.session_start._http.post_json", side_effect=_fake_post),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
-            patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -304,7 +305,7 @@ class TestSessionStartFailure:
                 return_value=(500, b'{"error":"internal"}'),
             ),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
-            patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -343,7 +344,7 @@ class TestSessionIdFormat:
                 return_value=(200, b'{"session_id":"sess-ok"}'),
             ),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
-            patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -403,7 +404,7 @@ class TestEventBufferFlush:
             patch("pyhooks.session_start._db.open_db") as mock_open_db,
             patch("pyhooks.session_start._http.post_json", side_effect=_fake_post),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
-            patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -503,3 +504,194 @@ class TestTracesPruning:
             )
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Codeweaver bootstrap tests
+# ---------------------------------------------------------------------------
+
+
+def test_codeweaver_already_installed_skips_ensure(tmp_path: Path) -> None:
+    """When find_spec returns a spec, ensure_installed returns True without subprocesses."""
+    mock_spec = MagicMock()
+    with (
+        patch("pyhooks.session_start.importlib.util.find_spec", return_value=mock_spec),
+        patch("pyhooks.session_start.subprocess.run") as mock_run,
+    ):
+        result = _ss_mod._codeweaver_ensure_installed(tmp_path)
+
+    assert result is True
+    mock_run.assert_not_called()
+
+
+def test_codeweaver_not_installed_venv_path_succeeds(tmp_path: Path) -> None:
+    """When find_spec returns None, venv creation and pip install succeed; flag stays False."""
+    import pyhooks.session_start as _ss
+
+    _ss._codeweaver_install_failed = False
+
+    mock_venv_builder = MagicMock()
+
+    with (
+        patch("pyhooks.session_start.importlib.util.find_spec", return_value=None),
+        patch("pyhooks.session_start.subprocess.run", return_value=MagicMock(returncode=0)),
+        patch("pyhooks.session_start.Path.exists", return_value=False),
+        patch("venv.EnvBuilder", return_value=mock_venv_builder),
+    ):
+        result = _ss._codeweaver_ensure_installed(tmp_path)
+
+    assert result is True
+    assert _ss._codeweaver_install_failed is False
+
+
+def test_codeweaver_venv_fails_user_fallback_succeeds(tmp_path: Path) -> None:
+    """When venv creation raises, the --user fallback succeeds; flag stays False."""
+    import pyhooks.session_start as _ss
+
+    _ss._codeweaver_install_failed = False
+
+    import venv as _venv_mod
+
+    # EnvBuilder.create raises (macOS ensurepip stripped) so the entire venv
+    # try-block is caught; subprocess.run is never reached inside that block.
+    # The --user fallback subprocess.run then succeeds.
+    with (
+        patch("pyhooks.session_start.importlib.util.find_spec", return_value=None),
+        patch("pyhooks.session_start.subprocess.run", return_value=MagicMock(returncode=0)),
+        patch("pyhooks.session_start.Path.exists", return_value=False),
+        patch.object(_venv_mod.EnvBuilder, "create", side_effect=Exception("ensurepip stripped")),
+    ):
+        result = _ss._codeweaver_ensure_installed(tmp_path)
+
+    assert result is True
+    assert _ss._codeweaver_install_failed is False
+
+
+def test_codeweaver_both_paths_fail_sets_flag(tmp_path: Path) -> None:
+    """When both venv and --user paths fail, _codeweaver_install_failed is set True."""
+    import pyhooks.session_start as _ss
+
+    _ss._codeweaver_install_failed = False
+
+    with (
+        patch("pyhooks.session_start.importlib.util.find_spec", return_value=None),
+        patch("pyhooks.session_start.subprocess.run", side_effect=subprocess.CalledProcessError(1, "pip")),
+        patch("pyhooks.session_start.Path.exists", return_value=False),
+    ):
+        import venv as _venv_mod
+
+        with patch.object(_venv_mod.EnvBuilder, "create", side_effect=Exception("ensurepip stripped")):
+            result = _ss._codeweaver_ensure_installed(tmp_path)
+
+    assert result is False
+    assert _ss._codeweaver_install_failed is True
+
+    # Reset module-level state after test
+    _ss._codeweaver_install_failed = False
+
+
+def test_upgrade_if_stale_guards_when_not_installed() -> None:
+    """When metadata.version raises PackageNotFoundError, upgrade returns immediately without subprocess."""
+    with (
+        patch(
+            "pyhooks.session_start.importlib.metadata.version",
+            side_effect=_ss_mod.importlib.metadata.PackageNotFoundError("neuroloom-codeweaver"),
+        ),
+        patch("pyhooks.session_start.subprocess.run") as mock_run,
+        patch("pyhooks.session_start.urllib.request.urlopen") as mock_urlopen,
+    ):
+        _ss_mod._codeweaver_upgrade_if_stale()
+
+    mock_run.assert_not_called()
+    mock_urlopen.assert_not_called()
+
+
+def test_offline_env_var_skips_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When NEUROLOOM_CODEWEAVER_OFFLINE is set, ensure_installed skips all install attempts."""
+    monkeypatch.setenv("NEUROLOOM_CODEWEAVER_OFFLINE", "1")
+
+    with (
+        patch("pyhooks.session_start.importlib.util.find_spec", return_value=None),
+        patch("pyhooks.session_start.subprocess.run") as mock_run,
+    ):
+        import venv as _venv_mod
+
+        with patch.object(_venv_mod.EnvBuilder, "create") as mock_create:
+            result = _ss_mod._codeweaver_ensure_installed(tmp_path)
+
+    # find_spec returned None so result is False, but no subprocess or venv called
+    assert result is False
+    mock_run.assert_not_called()
+    mock_create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Banner tests
+# ---------------------------------------------------------------------------
+
+
+def test_banner_fires_when_install_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When _codeweaver_install_failed is True, the degraded banner appears in stdout."""
+    import pyhooks.session_start as _ss
+
+    _ss._codeweaver_install_failed = True
+    try:
+        db_path = tmp_path / ".neuroloom.db"
+        output = io.StringIO()
+        monkeypatch.chdir(tmp_path)
+
+        with (
+            patch("pyhooks.session_start._config.load") as mock_load,
+            patch("pyhooks.session_start._db.open_db") as mock_open_db,
+            patch("pyhooks.session_start._http.post_json", return_value=(200, b'{"session_id":"sess-1-aabb"}')),
+            patch("pyhooks.session_start.sys.stdout", output),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+        ):
+            import pyhooks.config as _config_mod
+
+            mock_load.return_value = _config_mod.Config(
+                api_key="test-key-abc123",
+                api_base="http://localhost:19999",
+                state_db_path=db_path,
+            )
+            mock_open_db.side_effect = _real_open_db
+            _ss_mod.main()
+
+        assert "neuroloom-codeweaver could not be installed" in output.getvalue()
+    finally:
+        _ss._codeweaver_install_failed = False
+
+
+def test_no_banner_on_happy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When _codeweaver_install_failed is False (default), the banner must not appear."""
+    import pyhooks.session_start as _ss
+
+    # Ensure the flag is in its default state
+    _ss._codeweaver_install_failed = False
+
+    db_path = tmp_path / ".neuroloom.db"
+    output = io.StringIO()
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        patch("pyhooks.session_start._config.load") as mock_load,
+        patch("pyhooks.session_start._db.open_db") as mock_open_db,
+        patch("pyhooks.session_start._http.post_json", return_value=(200, b'{"session_id":"sess-1-aabb"}')),
+        patch("pyhooks.session_start.sys.stdout", output),
+        patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+    ):
+        import pyhooks.config as _config_mod
+
+        mock_load.return_value = _config_mod.Config(
+            api_key="test-key-abc123",
+            api_base="http://localhost:19999",
+            state_db_path=db_path,
+        )
+        mock_open_db.side_effect = _real_open_db
+        _ss_mod.main()
+
+    assert "neuroloom-codeweaver could not be installed" not in output.getvalue()

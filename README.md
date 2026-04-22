@@ -93,9 +93,27 @@ neuroloom-mcp install-plugin --force
 - **Code graph sync** — when you edit TypeScript or Python files, the plugin parses the file's structure (functions, classes, imports) via tree-sitter and syncs it to Neuroloom (support for other languages coming soon).
 - **MCP tools** — Claude can query Neuroloom directly via `memory_search`, `memory_explore`, `memory_store`, `memory_by_file`, and others.
 
+### Zero-touch bootstrap
+
+`neuroloom-codeweaver` — the code graph sync package — is installed automatically on first SessionStart. No manual install step is needed after a marketplace install.
+
+On the first session after installing the plugin, SessionStart creates a `.venv` inside the plugin directory and installs `neuroloom-codeweaver` into it in a background thread. If venv creation fails (for example, on macOS where the system Python has `ensurepip` stripped), it falls back to a `--user` install. A `--user` install lands in `~/.local/lib/...` on POSIX or `%APPDATA%\Python\` on Windows — visible to any code running under that interpreter, not isolated to the plugin venv.
+
+If both paths fail, a banner appears in the Claude Code transcript explaining how to install manually:
+
+```
+python3 -m pip install neuroloom-codeweaver
+```
+
+**Offline or air-gapped environments:** Set `NEUROLOOM_CODEWEAVER_OFFLINE` to any non-empty value to skip all install attempts entirely. The banner will not fire. This is also useful in CI where `neuroloom-codeweaver` is pre-installed.
+
+```bash
+export NEUROLOOM_CODEWEAVER_OFFLINE=1
+```
+
 ### How It Works
 
-All hooks are Python modules in `pyhooks/`, launched via `run_hook.py` through a local `.venv`. State is stored in a single SQLite database (`.neuroloom.db`) using WAL mode for concurrent access.
+All hooks are Python modules in `pyhooks/`, launched via `run_hook.py`. When a `.venv` exists inside the plugin directory, hooks run inside it; when it does not, the system Python that invoked the launcher is used as a fallback so all non-codeweaver hooks still run. State is stored in a single SQLite database (`.neuroloom.db`) using WAL mode for concurrent access.
 
 **SessionStart** — opens a Neuroloom session, replays any buffered observations from the previous session, injects the memory-first rule into `CLAUDE.md` if absent, and prints the tool catalog so Claude knows what's available.
 
@@ -115,7 +133,7 @@ All hook decisions are recorded in the `traces` table of the SQLite database for
 
 ### Code Graph Sync
 
-When you edit TypeScript or Python files, the plugin automatically parses each file's structure — functions, classes, and imports — and syncs it to Neuroloom in the background via the `neuroloom-codeweaver` package. No manual calls needed. The package is auto-updated at session start when a newer version is available on PyPI.
+When you edit TypeScript or Python files, the plugin automatically parses each file's structure — functions, classes, and imports — and syncs it to Neuroloom in the background via the `neuroloom-codeweaver` package. No manual install or calls needed — see [Zero-touch bootstrap](#zero-touch-bootstrap) above. The package is also checked for updates at each session start and upgraded in the background when a newer version is available on PyPI.
 
 ---
 

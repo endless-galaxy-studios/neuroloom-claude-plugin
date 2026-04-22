@@ -52,7 +52,7 @@ def _run_session_start(
         ),
         patch("pyhooks.session_start._http.post_json") as mock_post,
         patch("pyhooks.session_start.sys.stdout", output),
-        patch("pyhooks.session_start._codeweaver_update_check", return_value=None),
+        patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
     ):
 
         def _dispatch(

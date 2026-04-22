@@ -14,7 +14,7 @@ order:
    session.
 8. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``.
 9. Inject the memory-first reminder block into ``CLAUDE.md`` if absent.
-10. Launch a background thread to check for ``neuroloom-codeweaver`` upgrades.
+10. Launch a background thread to bootstrap/upgrade ``neuroloom-codeweaver``.
 11. Print the Neuroloom tool catalog to stdout so Claude Code sees it in context.
 12. Close the database in a ``finally`` block.
 
@@ -31,6 +31,7 @@ Design constraints
 from __future__ import annotations
 
 import importlib.metadata
+import importlib.util
 import json
 import os
 import re
@@ -48,6 +49,17 @@ import pyhooks.config as _config
 import pyhooks.db as _db
 import pyhooks.http as _http
 import pyhooks.trace as _trace
+
+# ---------------------------------------------------------------------------
+# Module-level state
+# ---------------------------------------------------------------------------
+
+# Set by the bootstrap thread when both install paths fail; read by main()
+# to decide whether to print the degradation banner (Phase 4).
+_codeweaver_install_failed: bool = False
+
+# Plugin root: pyhooks/ -> plugin root
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -125,6 +137,19 @@ Call when: you need the big picture on a subsystem, you want to see how decision
 <!-- /neuroloom-memory-first -->
 """
 
+# Banner printed to stdout (transcript-visible) when the codeweaver bootstrap
+# failed.  stdout is intentional — Claude Code renders it as assistant-context
+# text.  stderr is suppressed and would not surface to the user.
+_CODEWEAVER_DEGRADED_BANNER = """\
+<system-reminder>
+[Neuroloom] Code graph sync is unavailable — neuroloom-codeweaver could not be installed automatically.
+To enable code graph sync, run in a terminal:
+  python3 -m pip install neuroloom-codeweaver
+Verify with:
+  python3 -c 'import codeweaver; print(codeweaver.__version__)'
+Then restart your Claude Code session.
+</system-reminder>"""
+
 # The tool-catalog block printed at the end of a successful startup.
 _TOOL_CATALOG = """\
 <system-reminder>
@@ -182,19 +207,62 @@ def _end_session_call(
     _http.post_json(url, _auth_headers(api_key), b"{}", timeout=_END_SESSION_HTTP_TIMEOUT)
 
 
-def _codeweaver_update_check() -> None:
-    """
-    Background thread: check PyPI for a newer neuroloom-codeweaver release.
+def _codeweaver_is_installed() -> bool:
+    return importlib.util.find_spec("codeweaver") is not None
 
-    If a newer version is available, upgrade it via pip inside the plugin
-    virtual environment.  Silently skips if:
-    - The package is not installed (``ImportError`` from ``importlib.metadata``).
-    - PyPI is unreachable.
-    - Any other exception occurs.
-    """
+
+def _codeweaver_ensure_installed(plugin_root: Path) -> bool:
+    """Ensure neuroloom-codeweaver is importable; return True on success."""
+    global _codeweaver_install_failed
+
+    if os.environ.get("NEUROLOOM_CODEWEAVER_OFFLINE"):
+        return _codeweaver_is_installed()
+
+    if _codeweaver_is_installed():
+        return True
+
+    venv_py = plugin_root / ".venv" / (
+        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    )
+
+    # Path 2: create venv and pip-install into it
+    try:
+        import venv as _venv
+
+        if not venv_py.exists():
+            _venv.EnvBuilder(with_pip=True).create(str(plugin_root / ".venv"))
+        subprocess.run(
+            [str(venv_py), "-m", "pip", "install", "neuroloom-codeweaver"],
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+        return True
+    except Exception:
+        pass  # ensurepip stripped on macOS system Python, or venv otherwise broken
+
+    # Path 3: --user fallback
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--user", "neuroloom-codeweaver"],
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        pass
+
+    _codeweaver_install_failed = True
+    return False
+
+
+def _codeweaver_upgrade_if_stale() -> None:
     try:
         current = importlib.metadata.version("neuroloom-codeweaver")
     except importlib.metadata.PackageNotFoundError:
+        # guard — find_spec and metadata.version use different resolution paths;
+        # a broken install can pass one and fail the other.
         return
     except Exception:
         return
@@ -230,6 +298,12 @@ def _codeweaver_update_check() -> None:
         )
     except Exception:
         pass
+
+
+def _codeweaver_bootstrap_and_upgrade(plugin_root: Path) -> None:
+    installed = _codeweaver_ensure_installed(plugin_root)
+    if installed and _codeweaver_is_installed():
+        _codeweaver_upgrade_if_stale()
 
 
 # ---------------------------------------------------------------------------
@@ -527,14 +601,24 @@ def main() -> None:
         # Step 9 — CLAUDE.md injection.
         _inject_claudemd(cwd)
 
-        # Step 10 — codeweaver update check (background thread with short join).
-        updater = threading.Thread(target=_codeweaver_update_check, daemon=False)
+        # Step 10 — bootstrap/upgrade codeweaver (background thread with short join).
+        updater = threading.Thread(
+            target=_codeweaver_bootstrap_and_upgrade,
+            args=(_PLUGIN_ROOT,),
+            daemon=False,
+        )
         updater.start()
-        # Join with a short timeout so that a slow PyPI connection (up to 3 s)
+        # Join with a short timeout so that a slow PyPI/install (up to 120 s)
         # does not stall the rest of startup.  If the thread is still running
         # after 90 ms we proceed; the non-daemon thread will complete in the
         # background before the process exits.
         updater.join(timeout=0.090)
+
+        # Print degradation banner if the bootstrap thread set the failure flag.
+        # Best-effort racy read of a bool — acceptable under CPython's GIL.
+        # OFFLINE mode never sets the flag, so the banner is correctly suppressed.
+        if _codeweaver_install_failed:
+            print(_CODEWEAVER_DEGRADED_BANNER)
 
         # Step 11 — print tool catalog.
         print(_TOOL_CATALOG)
