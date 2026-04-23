@@ -18,6 +18,21 @@
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.preload_context"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(bfs *)",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.preload_context"
+          },
+          {
+            "type": "command",
+            "if": "Bash(ugrep *)",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.preload_context"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -32,7 +47,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "Read|Write|Edit|Bash|Agent|WebFetch|WebSearch|NotebookEdit|Glob|Grep",
         "hooks": [
           {
             "type": "command",

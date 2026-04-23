@@ -7,10 +7,12 @@ Supports two modes, determined by the tool_name field in the stdin JSON:
               POST /api/v1/context endpoint with format=inject and writes
               additionalContext into the Claude conversation window.
 
-    nudge   — fired when tool_name in ("Glob", "Grep"): extracts a meaningful
-              query from the tool's pattern, queries the same endpoint with
-              format=nudge, and injects a compact "you may want to
-              memory_search for X" reminder.
+    nudge   — fired when tool_name in ("Glob", "Grep") or when tool_name ==
+              "Bash" with a bfs or ugrep subcommand (native macOS/Linux builds
+              route Glob/Grep through these tools since v2.1.117): extracts a
+              meaningful query from the tool's pattern, queries the same
+              endpoint with format=nudge, and injects a compact "you may want
+              to memory_search for X" reminder.
 
 Writes a Claude hook JSON object to stdout:
 
@@ -39,6 +41,7 @@ import json
 import os
 import random
 import re
+import shlex
 import sqlite3
 import sys
 import time
@@ -64,6 +67,11 @@ _SESSION_ID_RE = re.compile(r"^sess-[0-9]+-[a-f0-9]+$")
 
 def _extract_query(tool_name: str, pattern: str) -> str | None:
     """Extract a meaningful search term from a Glob or Grep pattern.
+
+    bfs and ugrep patterns are normalised to Glob and Grep respectively at the
+    call site (via the effective_tool mapping in main()) before this function is
+    invoked — so this function always receives a standard tool name and a
+    pre-extracted pattern string, never "bfs" or "ugrep" as the tool argument.
 
     For Glob patterns, we look for the most specific path segment that actually
     names something — skipping wildcards-only segments.  Think of it like
@@ -118,6 +126,76 @@ def _extract_query(tool_name: str, pattern: str) -> str | None:
         return query
 
     return None
+
+
+def _extract_bash_pattern(sub_tool: str, command: str) -> str:
+    """Extract the search pattern from a bfs or ugrep command string.
+
+    bfs uses POSIX find-compatible flags: -name, -path, -iname, -ipath.
+    The pattern is the argument immediately following the flag.
+
+    ugrep uses the pattern as the first non-flag positional argument.
+    This mirrors how Grep patterns work: the search term comes before
+    the path argument.
+
+    Returns an empty string if no pattern can be extracted — the caller
+    will treat that as a no-op nudge.
+    """
+    if sub_tool == "bfs":
+        # Match -name/-path/-iname/-ipath followed by a quoted or unquoted value.
+        # The unquoted group uses [^\s|&;>]+ to avoid capturing shell pipe/redirect
+        # characters (e.g. `bfs . -name file.ts|grep foo` must not capture `file.ts|grep`).
+        m = re.search(
+            r"-(?:i?name|i?path)\s+(?:\"([^\"]+)\"|\'([^\']+)\'|([^\s|&;>]+))",
+            command,
+        )
+        if m:
+            return m.group(1) or m.group(2) or m.group(3) or ""
+        return ""
+
+    elif sub_tool == "ugrep":
+        # shlex.split honours quoted tokens, so `ugrep -r "async def" .` is
+        # tokenised as ["ugrep", "-r", "async def", "."] rather than splitting
+        # on the space inside the quoted string.
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            # Malformed quoting — return empty rather than crashing.
+            return ""
+        pattern = ""
+        skip_next = False
+        capture_next = False
+        for tok in tokens:
+            if capture_next:
+                # Previous token was -e; this token IS the pattern.
+                pattern = tok
+                break
+            if skip_next:
+                skip_next = False
+                continue
+            if tok == "-e":
+                # -e PATTERN: explicit pattern flag — next token IS the pattern.
+                capture_next = True
+                continue
+            # Flags that consume the next argument but are not the pattern.
+            if tok in ("-f", "-m", "-A", "-B", "-C",
+                       "--include", "--exclude",
+                       "--include-dir", "--exclude-dir"):
+                skip_next = True
+                continue
+            if tok.startswith("-e") and len(tok) > 2:
+                pattern = tok[2:]
+                break
+            if tok.startswith("-"):
+                continue
+            if tok == "ugrep":
+                continue
+            # First non-flag, non-program-name token is the pattern.
+            pattern = tok
+            break
+        return pattern
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +488,20 @@ def main() -> None:
             tool_input = {}
 
         # --------------------------------------------------------------
-        # Determine mode from tool_name
+        # Bash sub-tool detection (native builds route Glob → bfs, Grep → ugrep)
         # --------------------------------------------------------------
+        _cmd = ""
+        _bash_sub_tool: str | None = None
+        if tool_name == "Bash":
+            _cmd = str(tool_input.get("command", ""))
+            if re.match(r"\s*bfs\b", _cmd):
+                _bash_sub_tool = "bfs"
+            elif re.match(r"\s*ugrep\b", _cmd):
+                _bash_sub_tool = "ugrep"
+
         if tool_name in ("Glob", "Grep"):
+            mode = "nudge"
+        elif tool_name == "Bash" and _bash_sub_tool is not None:
             mode = "nudge"
         elif tool_name == "Read":
             mode = "inject"
@@ -425,7 +514,13 @@ def main() -> None:
         # Extract mode-specific inputs from tool_input
         # --------------------------------------------------------------
         file_path = str(tool_input.get("file_path", "")) if mode == "inject" else ""
-        query_pattern = str(tool_input.get("pattern", "")) if mode == "nudge" else ""
+        if mode == "nudge":
+            if tool_name == "Bash" and _bash_sub_tool is not None:
+                query_pattern = _extract_bash_pattern(_bash_sub_tool, _cmd)
+            else:
+                query_pattern = str(tool_input.get("pattern", ""))
+        else:
+            query_pattern = ""
 
         # Workspace root is the process working directory (resolved)
         workspace_root = str(Path(os.getcwd()).resolve())
@@ -467,7 +562,12 @@ def main() -> None:
         # --------------------------------------------------------------
         extracted_query: str | None = None
         if mode == "nudge":
-            extracted_query = _extract_query(tool_name, query_pattern)
+            effective_tool = (
+                {"bfs": "Glob", "ugrep": "Grep"}[_bash_sub_tool]
+                if tool_name == "Bash" and _bash_sub_tool
+                else tool_name
+            )
+            extracted_query = _extract_query(effective_tool, query_pattern)
             if not extracted_query:
                 _trace_mod.write(conn, "preload_context", "nudge_no_query")
                 print(json.dumps({}))
