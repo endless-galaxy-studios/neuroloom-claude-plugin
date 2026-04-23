@@ -64,6 +64,16 @@
           }
         ]
       }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.cache_prefetch"
+          }
+        ]
+      }
     ]
   }
 }

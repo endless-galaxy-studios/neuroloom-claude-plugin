@@ -186,6 +186,14 @@ def main() -> None:
             trace.write(conn, _SCRIPT, "malformed_input", session_id=session_id)
             sys.exit(0)
 
+        # Extract agent context (CC v2.1.69+). Both fields are absent on main-thread events.
+        # isinstance guard satisfies mypy --strict and handles non-string values defensively.
+        # [:100] truncation matches the API's String(100) column to prevent 422s.
+        _raw_aid = data.get("agent_id")
+        agent_id: str | None = str(_raw_aid)[:100] if isinstance(_raw_aid, str) else None
+        _raw_atype = data.get("agent_type")
+        agent_type: str | None = str(_raw_atype)[:100] if isinstance(_raw_atype, str) else None
+
         # -------------------------------------------------------------- 7
         tool_name: str = str(data.get("tool_name") or data.get("name") or "unknown")
 
@@ -223,6 +231,8 @@ def main() -> None:
             "observed_at": observed_at,
             "category": tool_name,
             "content": content_str,
+            "agent_id": agent_id,
+            "agent_type": agent_type,
         }
         batch_payload: dict[str, object] = {"observations": [single_obs]}
 

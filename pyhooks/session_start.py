@@ -97,6 +97,11 @@ _PYPI_TIMEOUT = 5.0
 # Marker used to detect an already-injected CLAUDE.md block.
 _CLAUDEMD_MARKER = "<!-- neuroloom:memory-first -->"
 
+# Filename written next to the .venv directory after a successful install.
+# Contains the installed neuroloom-codeweaver version so we can skip
+# redundant pip-install calls when the version has not changed.
+_CODEWEAVER_VERSION_MARKER = ".codeweaver-version"
+
 # The setup-instructions text printed when no API key is configured.
 _NO_KEY_MESSAGE = """\
 [Neuroloom plugin] No API key configured.
@@ -211,17 +216,62 @@ def _codeweaver_is_installed() -> bool:
     return importlib.util.find_spec("codeweaver") is not None
 
 
-def _codeweaver_ensure_installed(plugin_root: Path) -> bool:
+def _codeweaver_venv_dir(plugin_root: Path) -> Path:
+    """Return the .venv directory path.
+
+    Resolution order:
+    1. ${CLAUDE_PLUGIN_DATA}/.venv  — persistent across plugin version bumps (CC v2.1.78+)
+    2. plugin_root / ".venv"        — dev-mode fallback (no CLAUDE_PLUGIN_DATA set)
+    """
+    data_dir = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if data_dir:
+        return Path(data_dir) / ".venv"
+    return plugin_root / ".venv"
+
+
+def _codeweaver_version_is_current(venv_dir: Path) -> bool:
+    """Return True if the installed version matches the version marker file.
+
+    The marker file lives at venv_dir.parent / _CODEWEAVER_VERSION_MARKER.
+    If either the installed package or the marker file is missing, returns False
+    so that a fresh install is triggered.
+    """
+    try:
+        installed = importlib.metadata.version("neuroloom-codeweaver")
+        marker_path = venv_dir.parent / _CODEWEAVER_VERSION_MARKER
+        if not marker_path.exists():
+            return False
+        recorded = marker_path.read_text(encoding="utf-8").strip()
+        return installed == recorded
+    except Exception:
+        return False
+
+
+def _codeweaver_write_version_marker(venv_dir: Path) -> None:
+    """Write the current neuroloom-codeweaver version to the marker file.
+
+    The marker file lives at venv_dir.parent / _CODEWEAVER_VERSION_MARKER.
+    Silently no-ops on any error — the marker is an optimisation, not required.
+    """
+    try:
+        version = importlib.metadata.version("neuroloom-codeweaver")
+        marker_path = venv_dir.parent / _CODEWEAVER_VERSION_MARKER
+        marker_path.write_text(version + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _codeweaver_ensure_installed(venv_dir: Path) -> bool:
     """Ensure neuroloom-codeweaver is importable; return True on success."""
     global _codeweaver_install_failed
 
     if os.environ.get("NEUROLOOM_CODEWEAVER_OFFLINE"):
         return _codeweaver_is_installed()
 
-    if _codeweaver_is_installed():
+    if _codeweaver_is_installed() and _codeweaver_version_is_current(venv_dir):
         return True
 
-    venv_py = plugin_root / ".venv" / (
+    venv_py = venv_dir / (
         "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
     )
 
@@ -229,14 +279,16 @@ def _codeweaver_ensure_installed(plugin_root: Path) -> bool:
     try:
         import venv as _venv
 
+        venv_dir.parent.mkdir(parents=True, exist_ok=True)
         if not venv_py.exists():
-            _venv.EnvBuilder(with_pip=True).create(str(plugin_root / ".venv"))
+            _venv.EnvBuilder(with_pip=True).create(str(venv_dir))
         subprocess.run(
             [str(venv_py), "-m", "pip", "install", "neuroloom-codeweaver"],
             capture_output=True,
             timeout=120,
             check=True,
         )
+        _codeweaver_write_version_marker(venv_dir)
         return True
     except Exception:
         pass  # ensurepip stripped on macOS system Python, or venv otherwise broken
@@ -249,6 +301,7 @@ def _codeweaver_ensure_installed(plugin_root: Path) -> bool:
             timeout=120,
             check=True,
         )
+        _codeweaver_write_version_marker(venv_dir)
         return True
     except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
         pass
@@ -257,7 +310,7 @@ def _codeweaver_ensure_installed(plugin_root: Path) -> bool:
     return False
 
 
-def _codeweaver_upgrade_if_stale() -> None:
+def _codeweaver_upgrade_if_stale(venv_dir: Path) -> None:
     try:
         current = importlib.metadata.version("neuroloom-codeweaver")
     except importlib.metadata.PackageNotFoundError:
@@ -288,22 +341,23 @@ def _codeweaver_upgrade_if_stale() -> None:
     if _parse_version(latest) <= _parse_version(current):
         return
 
-    # Resolve pip inside the plugin's virtual environment.  The plugin venv
-    # lives at the same prefix as the currently running Python interpreter.
-    pip_path = str(Path(sys.executable).parent / "pip")
+    pip_suffix = "Scripts/pip.exe" if sys.platform == "win32" else "bin/pip"
+    pip_path = str(venv_dir / pip_suffix)
     try:
         subprocess.run(
             [pip_path, "install", "--upgrade", "neuroloom-codeweaver"],
             capture_output=True,
         )
+        _codeweaver_write_version_marker(venv_dir)
     except Exception:
         pass
 
 
 def _codeweaver_bootstrap_and_upgrade(plugin_root: Path) -> None:
-    installed = _codeweaver_ensure_installed(plugin_root)
+    venv_dir = _codeweaver_venv_dir(plugin_root)
+    installed = _codeweaver_ensure_installed(venv_dir)
     if installed and _codeweaver_is_installed():
-        _codeweaver_upgrade_if_stale()
+        _codeweaver_upgrade_if_stale(venv_dir)
 
 
 # ---------------------------------------------------------------------------
