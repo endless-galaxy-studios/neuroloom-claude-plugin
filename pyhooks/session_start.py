@@ -102,7 +102,8 @@ _CLAUDEMD_MARKER = "<!-- neuroloom:memory-first -->"
 # redundant pip-install calls when the version has not changed.
 _CODEWEAVER_VERSION_MARKER = ".codeweaver-version"
 
-# The setup-instructions text printed when no API key is configured.
+# The setup-instructions text printed when no API key is configured and the
+# MCP server is not reachable either.
 _NO_KEY_MESSAGE = """\
 [Neuroloom plugin] No API key configured.
 
@@ -616,14 +617,14 @@ def main() -> None:
     conn = _db.open_db(cfg.state_db_path)
 
     try:
+        cwd = str(Path(os.getcwd()).resolve())
+        workspace_key = cwd
+
         # Step 3 — guard: no API key configured.
         if not cfg.api_key:
             print(_NO_KEY_MESSAGE, end="")
             _trace.write(conn, _SCRIPT, "no_api_key")
             return
-
-        cwd = str(Path(os.getcwd()).resolve())
-        workspace_key = cwd
 
         # Step 4 — end stale session.
         if conn is not None:

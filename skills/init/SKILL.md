@@ -3,7 +3,77 @@ name: neuroloom:init
 description: Bootstrap workspace memory by crawling the codebase and storing structured memories for all key files and modules.
 ---
 
-You are executing the Neuroloom workspace initialization protocol. Your job is to crawl this codebase, understand its structure, and store a structured set of seed memories that will make future `memory_search` calls useful from the first query. Execute the three phases below in order. Do not skip phases or reorder them.
+You are executing the Neuroloom workspace initialization protocol. Your job is to crawl this codebase, understand its structure, and store a structured set of seed memories that will make future `memory_search` calls useful from the first query. Execute all phases below in order. Do not skip phases or reorder them.
+
+---
+
+## Phase 0 — API Key Setup
+
+Before anything else, ensure a Neuroloom API key is configured for this project.
+
+**Step 1: Check if a key already exists.**
+
+Run this Bash command to check whether the plugin already has an API key configured:
+
+```bash
+test -n "${CLAUDE_PLUGIN_OPTION_API_KEY:-}" && echo "KEY_SET" || echo "KEY_MISSING"
+```
+
+If the output is `KEY_SET`, skip to Phase 1 — the key is already configured via the plugin system.
+
+**Step 2: Prompt for the key.**
+
+If the key is missing, ask the user:
+
+```
+No Neuroloom API key found for this project.
+
+1. Go to https://app.neuroloom.dev/settings/api-key to get your key
+2. Paste it here when ready
+
+(If you've already configured it via `/plugins configure neuroloom`, just say "skip")
+```
+
+Wait for the user's response.
+
+- If the user says "skip" or similar → proceed to Phase 1 without storing anything.
+- If the user pastes a key → continue to Step 3.
+
+**Step 3: Store the key in `.neuroloom.db`.**
+
+Run this Bash command to store the key (replace `{KEY}` with the user's input — do NOT echo the key to stdout):
+
+```bash
+python3 -c "
+import sqlite3, os
+db = sqlite3.connect('.neuroloom.db')
+db.execute('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+db.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('api_key', os.environ['_NL_KEY']))
+db.commit()
+db.close()
+print('ok')
+" 2>&1
+```
+
+Pass the key via an environment variable `_NL_KEY` to avoid it appearing in the command string or shell history.
+
+**Step 4: Verify the key works.**
+
+Run this Bash command to test the key against the API:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Token {KEY}" https://api.neuroloom.dev/api/v1/workspaces/
+```
+
+- `200` → Print `API key verified.` and proceed to Phase 1.
+- `401` → Print `API key rejected — check that you copied the full key. Try again or say "skip" to continue without it.` Return to Step 2.
+- Any other status or timeout → Print `Could not reach the Neuroloom API. The key has been saved — it will be verified on next session start.` Proceed to Phase 1.
+
+Also remind the user to configure the key in the plugin system for future sessions:
+
+```
+Tip: Run `/plugins configure neuroloom` and paste your key there too — that persists it across all projects.
+```
 
 ---
 

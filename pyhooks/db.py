@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS traces (
     elapsed_ms INTEGER,
     detail     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 

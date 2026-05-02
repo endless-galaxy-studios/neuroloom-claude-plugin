@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/docs/en/plugins-reference#plugin-manifest-schema",
   "name": "neuroloom",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Claude Code remembers across sessions. Automatic observation capture stores every decision and context shift — searchable in every future session.",
   "author": {
     "name": "Endless Galaxy Studios"
@@ -15,7 +15,8 @@
       "title": "API Key",
       "description": "Your Neuroloom API key. Get one at https://app.neuroloom.dev/settings/api-key",
       "type": "string",
-      "sensitive": true
+      "sensitive": true,
+      "required": true
     }
   }
 }
