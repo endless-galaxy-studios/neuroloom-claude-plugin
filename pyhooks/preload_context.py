@@ -394,6 +394,7 @@ def _fetch_context(
     timeout: float = 3.0,
     fmt: str = "inject",
     query: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[str, int] | None:
     """POST to /api/v1/context and return (text, ttl_seconds), or None on failure.
 
@@ -421,6 +422,9 @@ def _fetch_context(
         payload_dict: dict[str, str] = {"query": query or "", "format": "nudge"}
     else:
         payload_dict = {"file_path": file_path, "format": "inject"}
+
+    if session_id is not None:
+        payload_dict["session_id"] = session_id
 
     payload = json.dumps(payload_dict).encode("utf-8")
     req = urllib.request.Request(
@@ -622,6 +626,7 @@ def main() -> None:
                     file_path,
                     fmt=mode,
                     query=extracted_query if mode == "nudge" else None,
+                    session_id=session_id,
                 )
             except (TimeoutError, urllib.error.URLError):
                 # Network-level failure — trip the circuit breaker
