@@ -75,6 +75,45 @@ Also remind the user to configure the key in the plugin system for future sessio
 Tip: Run `/plugins configure neuroloom` and paste your key there too — that persists it across all projects.
 ```
 
+**Step 5: Configure workspace routing.**
+
+After the API key is verified (or was already present), run the workspace auto-configuration:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+from pathlib import Path
+from pyhooks.workspace_config import ensure_workspace_configured
+import os
+
+project_root = os.getcwd()
+db_path = Path(project_root) / '.neuroloom.db'
+api_key = os.environ.get('CLAUDE_PLUGIN_OPTION_API_KEY', '')
+
+if not api_key:
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute('SELECT value FROM config WHERE key = ?', ('api_key',)).fetchone()
+        api_key = row[0] if row else ''
+        conn.close()
+    except Exception:
+        api_key = ''
+
+ws = ensure_workspace_configured(
+    project_root=project_root,
+    db_path=db_path,
+    api_base='https://api.neuroloom.dev',
+    api_key=api_key,
+)
+print(f'workspace:{ws}' if ws else 'workspace:none')
+"
+```
+
+- If the output contains `workspace:` followed by a UUID → Print `Workspace configured: [UUID]. All MCP requests will route to this workspace.`
+- If the output is `workspace:none` → Print `Could not determine workspace — it will be configured on next session start.` Continue to Phase 1.
+
+This step writes the `X-Workspace-Id` header into your project's `.mcp.json`, enabling per-project workspace routing. If you have multiple workspaces and want this project to use a different one, edit the `X-Workspace-Id` value in `.mcp.json`.
+
 ---
 
 ## Phase 1 — Self-Orient (no user input required)

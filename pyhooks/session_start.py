@@ -12,11 +12,14 @@ order:
 6. Prune old trace rows to keep the DB from growing unboundedly.
 7. Flush any buffered observation events that did not drain during the last
    session.
-8. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``.
-9. Inject the memory-first reminder block into ``CLAUDE.md`` if absent.
-10. Launch a background thread to bootstrap/upgrade ``neuroloom-codeweaver``.
-11. Print the Neuroloom tool catalog to stdout so Claude Code sees it in context.
-12. Close the database in a ``finally`` block.
+8. Auto-configure the workspace_id: fetch from API (or read from local cache)
+   and write the X-Workspace-Id header into the project-level .mcp.json so
+   every MCP request routes to the correct workspace automatically.
+9. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``.
+10. Inject the memory-first reminder block into ``CLAUDE.md`` if absent.
+11. Launch a background thread to bootstrap/upgrade ``neuroloom-codeweaver``.
+12. Print the Neuroloom tool catalog to stdout so Claude Code sees it in context.
+13. Close the database in a ``finally`` block.
 
 Design constraints
 ------------------
@@ -49,6 +52,7 @@ import pyhooks.config as _config
 import pyhooks.db as _db
 import pyhooks.http as _http
 import pyhooks.trace as _trace
+import pyhooks.workspace_config as _workspace_config
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -606,7 +610,7 @@ def main() -> None:
     """
     Run the SessionStart hook.
 
-    Follows the 12-step sequence documented in the module docstring.  The
+    Follows the 13-step sequence documented in the module docstring.  The
     database connection is always closed in a ``finally`` block even if an
     unexpected exception occurs mid-way through.
     """
@@ -650,13 +654,26 @@ def main() -> None:
         flush_thread.start()
         flush_thread.join(timeout=0.090)
 
-        # Step 8 — .gitignore management.
+        # Step 8 — workspace auto-configuration.
+        # Fetches the workspace_id for this API key (from cache or API) and
+        # writes it into the project-level .mcp.json as the X-Workspace-Id
+        # header.  Non-fatal — a failure here does not block the session.
+        # Skip when there is no API key (guard already returned above) or
+        # when the MCP server is not the active connection mode.
+        _workspace_config.ensure_workspace_configured(
+            project_root=cwd,
+            db_path=cfg.state_db_path,
+            api_base=cfg.api_base,
+            api_key=cfg.api_key,
+        )
+
+        # Step 9 — .gitignore management.
         _ensure_gitignore(cwd)
 
-        # Step 9 — CLAUDE.md injection.
+        # Step 10 — CLAUDE.md injection.
         _inject_claudemd(cwd)
 
-        # Step 10 — bootstrap/upgrade codeweaver (background thread with short join).
+        # Step 11 — bootstrap/upgrade codeweaver (background thread with short join).
         updater = threading.Thread(
             target=_codeweaver_bootstrap_and_upgrade,
             args=(_PLUGIN_ROOT,),
@@ -675,13 +692,13 @@ def main() -> None:
         if _codeweaver_install_failed:
             print(_CODEWEAVER_DEGRADED_BANNER)
 
-        # Step 11 — print tool catalog.
+        # Step 12 — print tool catalog.
         print(_TOOL_CATALOG)
 
         _trace.write(conn, _SCRIPT, "started", session_id=session_id)
 
     finally:
-        # Step 12 — close DB.
+        # Step 13 — close DB.
         if conn is not None:
             conn.close()
 

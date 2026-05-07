@@ -24,6 +24,15 @@ Resolution order for api_key
 2. ``NEUROLOOM_API_KEY`` environment variable (manual config or CI).
 3. ``config`` table in ``.neuroloom.db`` in the current working directory
    (written by the OAuth flow so that non-env callers can authenticate).
+
+workspace_id
+------------
+The ``workspace_id`` field is loaded exclusively from the ``config`` table in
+``.neuroloom.db``.  It is written there by
+``pyhooks.workspace_config.ensure_workspace_configured`` after the first
+successful session start.  There is no environment variable override for
+workspace_id — the value is always fetched from the Neuroloom API and cached
+locally so it stays in sync with the API key's actual workspace assignment.
 """
 
 import logging
@@ -40,6 +49,7 @@ class Config:
     api_key: str
     api_base: str
     state_db_path: Path
+    workspace_id: str = ""
 
 
 def _load_from_state_db(cwd: str) -> str | None:
@@ -58,6 +68,31 @@ def _load_from_state_db(cwd: str) -> str | None:
         return None
 
 
+def _load_workspace_id_from_state_db(cwd: str) -> str:
+    """
+    Load workspace_id from .neuroloom.db config table.
+
+    Returns an empty string if the file does not exist, the entry is missing,
+    or reading fails.  The workspace_id is populated asynchronously by
+    ``pyhooks.workspace_config.ensure_workspace_configured`` after the first
+    successful session start.
+    """
+    db_path = os.path.join(cwd, ".neuroloom.db")
+    if not os.path.exists(db_path):
+        return ""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute(
+            "SELECT value FROM config WHERE key = 'workspace_id' LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception:
+        logger.warning("Failed to load workspace_id from .neuroloom.db", exc_info=True)
+        return ""
+
+
 def load() -> Config:
     """Read configuration from the environment, returning safe defaults for any missing value."""
     cwd = os.getcwd()
@@ -74,9 +109,11 @@ def load() -> Config:
     )
     api_base = os.environ.get("NEUROLOOM_API_BASE", "https://api.neuroloom.dev")
     state_db_path = Path(cwd) / ".neuroloom.db"
+    workspace_id = _load_workspace_id_from_state_db(cwd)
 
     return Config(
         api_key=api_key,
         api_base=api_base,
         state_db_path=state_db_path,
+        workspace_id=workspace_id,
     )
