@@ -14,15 +14,15 @@ Note: These paths are relative to your project root. Run `/neuroloom:status` fro
    - If the MCP call fails with a connection error → show: `Connection: Failed (MCP server unreachable)` and stop.
    - If `workspace_insight` returns an `"error"` key → show the error message and stop.
 
-2. **Session info**: Read `.neuroloom/session.json` using the Bash tool:
+2. **Session info**: Query `.neuroloom.db` using the Bash tool:
    ```bash
-   cat .neuroloom/session.json 2>/dev/null || echo "No active session"
+   sqlite3 .neuroloom.db "SELECT session_id, started_at FROM sessions LIMIT 1;" 2>/dev/null || echo "No active session"
    ```
-   Show the session ID and when it started (use the `started_at` field if present; otherwise derive from the epoch in the session ID).
+   Show the session ID and when it started (use the `started_at` column).
 
 3. **Buffer health**: Count buffered events using the Bash tool:
    ```bash
-   wc -l < .neuroloom/events.jsonl 2>/dev/null || echo "0"
+   sqlite3 .neuroloom.db "SELECT COUNT(*) FROM event_buffer;" 2>/dev/null || echo "0"
    ```
    Report the number of events waiting to be flushed.
 
@@ -59,11 +59,11 @@ Memory Base
 - `total_relationships` is the total edge count for the workspace.
 - `relationship_counts` is a list of `{relationship_type, count}` objects sorted by count descending.
 - `last_discovery_run_at` is an ISO timestamp or null — if null, show "not yet run (nightly job hasn't fired)".
-- `pending_observations` is the observation buffer depth from `workspace_insight` (plus `events.jsonl` lines from step 3 for local buffered events not yet flushed to the API).
+- `pending_observations` is the observation buffer depth from `workspace_insight` (plus `event_buffer` row count from step 3 for local buffered events not yet flushed to the API).
 - `last_memory_added_at` is an ISO timestamp or null — if null, show "no memories stored yet".
 - Keep the layout scannable in 5 seconds. No JSON blobs in the default output.
 
-If session.json does not exist, report "No active session — a new one starts automatically on your next Claude Code session."
+If `.neuroloom.db` does not exist or the `sessions` table is empty, report "No active session — a new one starts automatically on your next Claude Code session."
 
 5. **Memory base check (legacy seed detection)**: Skip this step if `workspace_insight` already returned meaningful data. Otherwise, fall back to a `memory_search` call:
    - `query`: `"project seed memories"`
