@@ -256,39 +256,60 @@ If the repo has fewer high-signal files than the lower bounds, store what is war
 
 ### Memory Type Mapping
 
-Every `memory_store` call requires a `memory_type`. Use exactly one of these values:
+Every memory item requires a `memory_type`. Use exactly one of these values:
 
 | Content being stored | `memory_type` value |
 |---|---|
 | Project overview, module structure, service architecture | `architecture` |
 | Coding patterns, framework conventions, design patterns | `pattern` |
 | Naming conventions, style guides, code standards | `convention` |
-| Config files, environment variables, build setup | `configuration` |
-| External service integrations, API clients, third-party SDKs | `integration` |
-| Dependency management, package.json, pyproject.toml specifics | `dependency` |
+| Config choices, environment variables, build setup | `decision` or `convention` |
+| External service integrations, API clients, third-party SDKs | `architecture` |
+| Dependency management decisions (package.json, pyproject.toml) | `decision` |
 | Explicit design decisions from README, ADRs, or code comments | `decision` |
-| Auth, secrets management, permission models, security patterns | `security` |
-| Performance-critical code, optimization notes, caching layers | `performance` |
-| Documentation files, API docs, README sections | `documentation` |
-| Concepts, domain knowledge, or explanatory context | `learning` |
+| Auth, secrets management, permission models, security patterns | `convention` or `pattern` |
+| Performance-critical code, optimization notes, caching layers | `discovery` or `pattern` |
+| Documentation files, API docs, README sections | `wiki` |
+| Concepts, domain knowledge, or explanatory context | `discovery` |
+| Something broke and was fixed; failure mode and resolution | `incident` |
+| Debugging insights and non-obvious runtime behaviors | `discovery` |
+| Refactoring decisions and rationale | `decision` |
 | Anything that does not fit the above categories | `general` |
 
-Do not invent other values. The full set of valid `memory_type` values is: `decision`, `pattern`, `bug_fix`, `architecture`, `integration`, `configuration`, `debugging`, `refactoring`, `documentation`, `learning`, `convention`, `dependency`, `performance`, `security`, `general`, `wiki`, `sdlc_knowledge`. The table above covers the types most commonly needed during init. Do not use `document`, `file`, `code`, or any other string not in the valid set.
+Do not invent other values. The full set of valid `memory_type` values is: `decision`, `pattern`, `convention`, `architecture`, `discovery`, `incident`, `general`, `wiki`, `sdlc_knowledge`. The table above covers the types most commonly needed during init. Do not use `document`, `file`, `code`, or any other string not in the valid set.
 
-### `memory_store` Parameter Reference
+### `memory_store_batch` Parameter Reference
 
-Call `memory_store` with these parameters for every memory:
+Collect all memories planned for the run into a list, then call `memory_store_batch` once
+with the full list. Do not call `memory_store` in a loop.
 
-- `title` (required, string) — A specific, descriptive title. Bad: "Auth module". Good: "JWT authentication with refresh token rotation — auth module".
-- `memory_type` (required, string) — One value from the mapping table above.
-- `content` (required, string) — The primary narrative. See content quality guidance below.
-- `summary` (optional, string) — One sentence. The clearest possible description of what this memory covers. This is prepended to content in search results, so make it count.
-- `concepts` (optional, list of strings) — 3–6 labels drawn from: framework names, language names, architectural patterns (e.g., "async", "event-sourcing", "CQRS"), domain terms (e.g., "workspace", "embedding", "tenant-isolation"), module names. These drive relationship discovery between memories.
-- `tags` (optional, list of strings) — ALWAYS include `"seed"` on every memory stored during this init run. Add these operational tags as appropriate: `module-summary` (for module-level memories), `project-overview` (for the single project overview memory), `entry-point` (for main/index files), `schema` (for model/schema files), `configuration` (for config files), `integration` (for third-party integration files).
-- `files` (optional, list of strings) — Always include on key-file memories and module summaries. Paths relative to project root, no leading `./`. Example: `"api/routers/memories.py"`, not `"./api/routers/memories.py"`.
-- `importance` (optional, float 0.0–1.0) — Use `0.9` for the project overview, `0.8` for module summaries. Omit for key-file memories (the default of `0.7` applies).
-- `confidence` (optional, float 0.0–1.0) — Omit; use the default of `0.8`.
-- `sync_embedding` (optional, bool) — Leave at default. Do not set this parameter.
+`memory_store_batch` accepts a `memories` array. Each item supports the same fields as the
+individual `memory_store` tool:
+
+- `title` (required, string)
+- `memory_type` (required, string)
+- `content` (required, string)
+- `summary` (optional, string)
+- `concepts` (optional, list of strings)
+- `tags` (optional, list of strings)
+- `files` (optional, list of strings)
+- `context_files` (optional, list of strings)
+- `importance` (optional, float 0.0–1.0)
+- `confidence` (optional, float 0.0–1.0)
+
+**Batching strategy:** Build the full list of memory dicts in memory first. When the planned
+memory count exceeds 100, split into batches of <=100 and call `memory_store_batch` once per batch.
+
+**Progress reporting:** After each `memory_store_batch` call completes, print:
+
+    Stored [created_count] memories (batch [B]/[total_batches]). [error_count] failed.
+
+If `error_count > 0`, print one warning line per failed item using the `error` field from
+its result entry.
+
+**Partial failure handling:** `memory_store_batch` returns per-item results. A failed item in
+one batch does not abort subsequent batches. Track total failures across all batches for the
+Final Summary.
 
 ### Content Quality Guidance
 
@@ -334,27 +355,26 @@ Where `[N]` is your planned total count and `[M]` is the number of top-level mod
 
 ### Partial Failure Handling
 
-If a `memory_store` call fails for any reason:
-- Print one line: `Warning: failed to store memory for [title] — [error message]`
-- Skip that memory and continue with the next one
-- Track the failure count for the final summary
+`memory_store_batch` returns a `results` list with one entry per input memory. Each entry has:
+- `success` (bool) — whether the memory was created
+- `memory_id` (string, if success=true) — the created memory's ID
+- `error` (string, if success=false) — the failure reason
 
-Do not abort the entire run on a single failure.
+For each failed item, print one line:
+
+    Warning: failed to store memory for [title] — [error]
+
+Do not abort the run on item failures. Track the failure count for the Final Summary.
 
 ### Progress Reporting
 
-After every 5 memories stored, print:
-```
-Stored [N]/[target] memories...
-```
-
-Where `[target]` is your planned total count (established before you begin storing).
+Progress is reported after each `memory_store_batch` call completes, not after individual stores. See the **Progress reporting** note under the `memory_store_batch` Parameter Reference above for the exact output format.
 
 ---
 
 ## Phase 4 — Code Graph Seeding
 
-After the last `memory_store` call in Phase 3, run the code graph seed step.
+After the last `memory_store_batch` call in Phase 3, run the code graph seed step.
 
 **Step 1: Announce.**
 
