@@ -8,7 +8,7 @@ never crash due to misconfiguration.
 Environment variables
 ---------------------
 CLAUDE_PLUGIN_OPTION_API_KEY
-    Neuroloom API key (checked first, set by Claude Code plugin system).
+    Neuroloom API key (global fallback, set by Claude Code plugin system).
 
 NEUROLOOM_API_KEY
     Neuroloom API key fallback (for manual configuration or CI).
@@ -19,11 +19,17 @@ NEUROLOOM_API_BASE
 
 Resolution order for api_key
 -----------------------------
-1. ``CLAUDE_PLUGIN_OPTION_API_KEY`` environment variable (set by Claude Code
-   plugin system when the user configures an API key via ``/plugins configure``).
-2. ``NEUROLOOM_API_KEY`` environment variable (manual config or CI).
-3. ``config`` table in ``.neuroloom.db`` in the current working directory
-   (written by the OAuth flow so that non-env callers can authenticate).
+1. ``config`` table in ``.neuroloom.db`` in the current working directory
+   (per-project key — ensures each project routes to its own workspace).
+2. ``CLAUDE_PLUGIN_OPTION_API_KEY`` environment variable (set by Claude Code
+   plugin system — global fallback when no per-project key exists).
+3. ``NEUROLOOM_API_KEY`` environment variable (manual config or CI).
+
+The per-project key takes priority because Claude Code stores the plugin
+userConfig API key globally (in the macOS Keychain via ``sensitive: true``),
+so all projects share the same key.  Projects that have a per-project key
+in .neuroloom.db route to the correct workspace; projects without one fall
+through to the global key.
 
 workspace_id
 ------------
@@ -97,14 +103,14 @@ def load() -> Config:
     """Read configuration from the environment, returning safe defaults for any missing value."""
     cwd = os.getcwd()
 
-    # Resolution order:
-    # 1. CLAUDE_PLUGIN_OPTION_API_KEY — set by Claude Code plugin system
-    # 2. NEUROLOOM_API_KEY — manual config or CI
-    # 3. .neuroloom.db config table — written by the OAuth flow
+    # Resolution order (per-project first, global fallback):
+    # 1. .neuroloom.db config table — per-project key, correct workspace
+    # 2. CLAUDE_PLUGIN_OPTION_API_KEY — global key from macOS Keychain
+    # 3. NEUROLOOM_API_KEY — manual config or CI
     api_key = (
-        os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "").strip()
+        _load_from_state_db(cwd)
+        or os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "").strip()
         or os.environ.get("NEUROLOOM_API_KEY", "").strip()
-        or _load_from_state_db(cwd)
         or ""
     )
     api_base = os.environ.get("NEUROLOOM_API_BASE", "https://api.neuroloom.dev")
