@@ -2,8 +2,8 @@
 Workspace ID auto-configuration for neuroloom-claude-plugin.
 
 Fetches the workspace_id from the Neuroloom API and writes it into the
-project-level MCP server configuration so that every MCP request is
-automatically routed to the correct workspace.
+project's plugin config so that every MCP request includes the correct
+X-Workspace-Id header via ${user_config.workspace_id} substitution.
 
 --- Why this matters ---
 
@@ -15,8 +15,10 @@ X-Workspace-Id HTTP header that overrides the JWT claim, enabling per-project
 workspace routing.
 
 This module handles the Claude Code side of that story: after authentication,
-the plugin fetches the workspace_id for the current API key and writes the
-header into the project's .mcp.json file. No manual setup required.
+the plugin fetches the workspace_id for the current API key and writes it
+into the project's pluginConfigs in .claude/settings.json. Claude Code's
+${user_config.workspace_id} substitution in the plugin's .mcp.json then
+injects the header on every MCP request. No manual setup required.
 
 --- What this module does ---
 
@@ -28,9 +30,10 @@ header into the project's .mcp.json file. No manual setup required.
 2. Stores the workspace_id in the .neuroloom.db config table (same key/value
    store used for api_key).
 
-3. Updates (or creates) the project-level .mcp.json file to include:
-     "headers": {"X-Workspace-Id": "<workspace_id>"}
-   under the "neuroloom" MCP server entry.
+3. Writes the workspace_id into .claude/settings.json under
+   pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id.
+   Claude Code reads this value and substitutes it into the plugin's .mcp.json
+   header template at runtime.
 
 4. Returns the workspace_id on success, None on any failure. This module
    never raises — callers rely on it being non-fatal.
@@ -40,17 +43,6 @@ header into the project's .mcp.json file. No manual setup required.
 session_start.py calls _ensure_workspace_configured() after successfully
 starting a session. The workspace_id fetch is skipped if one is already
 stored in .neuroloom.db, so subsequent sessions incur zero network cost.
-
---- MCP config file selection ---
-
-The .mcp.json file is the Claude Code project-level MCP configuration.
-It lives in the project root (same directory as CLAUDE.md). This file
-takes precedence over the user-level ~/.claude/mcp.json for project-specific
-tool configuration.
-
-Claude Code also reads MCP configuration from .claude/settings.json under
-the "mcpServers" key, but .mcp.json is the recommended project-level path
-and is what the quickstart guide shows. This module writes to .mcp.json.
 """
 
 import json
@@ -63,21 +55,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Config table key for the stored workspace_id.
 _WORKSPACE_ID_KEY = "workspace_id"
 
-# GET endpoint that resolves workspace_id from the current API key/token.
 _INSIGHT_PATH = "/api/v1/workspaces/mine/insight"
 
-# HTTP timeout for the workspace fetch (seconds). Kept short — this runs at
-# session start. A slow network should not block Claude Code from opening.
 _FETCH_TIMEOUT = 5.0
 
-# Name of the MCP server entry written to .mcp.json.
-_MCP_SERVER_NAME = "neuroloom"
-
-# Default MCP server URL. Used when creating a new .mcp.json entry.
-_MCP_SERVER_URL = "https://mcp.neuroloom.dev/mcp"
+_PLUGIN_ID = "neuroloom@endless-galaxy-studios"
 
 
 def load_workspace_id_from_db(db_path: Path) -> str | None:
@@ -158,57 +142,52 @@ def _fetch_workspace_id_from_api(api_base: str, api_key: str) -> str | None:
         return None
 
 
-def _update_mcp_json(project_root: str, workspace_id: str) -> bool:
+def _update_plugin_config(project_root: str, workspace_id: str) -> bool:
     """
-    Write or update the .mcp.json file in the project root so the neuroloom
-    MCP server entry includes X-Workspace-Id in its headers.
+    Write workspace_id into the project's .claude/settings.json under
+    pluginConfigs so Claude Code substitutes it via ${user_config.workspace_id}.
+
+    The settings.json path: .claude/settings.json
+    The key path: pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id
 
     Strategy:
-    - If .mcp.json does not exist: create it with a minimal neuroloom entry.
-    - If .mcp.json exists and has a "neuroloom" entry: add or update the
-      X-Workspace-Id header inside that entry's "headers" dict.
-    - If .mcp.json exists but has no "neuroloom" entry: add one.
-
-    The file is written with 2-space indentation and a trailing newline to
-    match the project's .mcp.json convention.
+    - Read existing settings.json (create if missing).
+    - Merge workspace_id into the pluginConfigs section.
+    - Write back only if the value changed.
 
     Returns True on success, False on any failure.
     """
-    mcp_path = Path(project_root) / ".mcp.json"
+    settings_path = Path(project_root) / ".claude" / "settings.json"
 
     try:
-        if mcp_path.exists():
+        if settings_path.exists():
             try:
-                with mcp_path.open("r", encoding="utf-8") as fh:
-                    config: dict = json.load(fh)
+                with settings_path.open("r", encoding="utf-8") as fh:
+                    settings: dict = json.load(fh)
             except (json.JSONDecodeError, OSError):
-                # Malformed or unreadable — do not clobber.
-                logger.debug(".mcp.json is malformed, skipping workspace header update")
+                logger.debug(".claude/settings.json is malformed, skipping")
                 return False
         else:
-            config = {}
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings = {}
 
-        mcp_servers: dict = config.setdefault("mcpServers", {})
-        server_entry: dict = mcp_servers.setdefault(
-            _MCP_SERVER_NAME,
-            {"type": "http", "url": _MCP_SERVER_URL},
-        )
-        headers: dict = server_entry.setdefault("headers", {})
+        plugin_configs: dict = settings.setdefault("pluginConfigs", {})
+        plugin_entry: dict = plugin_configs.setdefault(_PLUGIN_ID, {})
+        options: dict = plugin_entry.setdefault("options", {})
 
-        # Only write the file if the value would actually change.
-        if headers.get("X-Workspace-Id") == workspace_id:
+        if options.get(_WORKSPACE_ID_KEY) == workspace_id:
             return True
 
-        headers["X-Workspace-Id"] = workspace_id
+        options[_WORKSPACE_ID_KEY] = workspace_id
 
-        with mcp_path.open("w", encoding="utf-8") as fh:
-            json.dump(config, fh, indent=2)
+        with settings_path.open("w", encoding="utf-8") as fh:
+            json.dump(settings, fh, indent=2)
             fh.write("\n")
 
         return True
 
     except Exception:
-        logger.debug("Failed to update .mcp.json", exc_info=True)
+        logger.debug("Failed to update .claude/settings.json", exc_info=True)
         return False
 
 
@@ -224,7 +203,7 @@ def ensure_workspace_configured(
     Resolution order:
     1. Read from .neuroloom.db config table (fast path — no network call).
     2. If not stored, fetch from the API and cache it in .neuroloom.db.
-    3. Update .mcp.json with the X-Workspace-Id header.
+    3. Write workspace_id into .claude/settings.json pluginConfigs.
 
     Returns the workspace_id on success, None if it cannot be determined.
     Always non-fatal.
@@ -232,10 +211,8 @@ def ensure_workspace_configured(
     if not api_key:
         return None
 
-    # Step 1: check the local cache first.
     workspace_id = load_workspace_id_from_db(db_path)
 
-    # Step 2: if not cached, fetch from the API and persist.
     if not workspace_id:
         workspace_id = _fetch_workspace_id_from_api(api_base, api_key)
         if workspace_id:
@@ -244,7 +221,6 @@ def ensure_workspace_configured(
     if not workspace_id:
         return None
 
-    # Step 3: write X-Workspace-Id into the project-level .mcp.json.
-    _update_mcp_json(project_root, workspace_id)
+    _update_plugin_config(project_root, workspace_id)
 
     return workspace_id
