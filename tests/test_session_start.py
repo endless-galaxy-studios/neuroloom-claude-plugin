@@ -7,7 +7,9 @@ injection, trace pruning, and session start failure.
 """
 
 import io
+import json
 import re
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -427,6 +429,315 @@ class TestEventBufferFlush:
             assert remaining == 0, "event_buffer should be empty after successful flush"
         finally:
             conn2.close()
+
+
+def _seed_buffer_row(
+    conn: sqlite3.Connection,
+    payload: dict[str, object],
+    payload_type: str | None,
+) -> int:
+    """Insert one event_buffer row with an explicit payload_type and return its id."""
+    cur = conn.execute(
+        "INSERT INTO event_buffer (payload, created_at, payload_type) VALUES (?, ?, ?)",
+        (json.dumps(payload), time.time(), payload_type),
+    )
+    conn.commit()
+    row_id = cur.lastrowid
+    assert row_id is not None
+    return row_id
+
+
+def _observation_payload(n: int = 0) -> dict[str, object]:
+    return {
+        "observation_id": f"obs-{n}",
+        "session_id": f"sess-{n}",
+        "observed_at": "2026-07-10T00:00:00+00:00",
+        "category": "Write",
+        "content": "{}",
+        "agent_id": None,
+        "agent_type": None,
+    }
+
+
+def _document_payload(title: str = "doc.md", source_type: str = "sdlc_deliverable") -> dict[str, object]:
+    return {
+        "title": title,
+        "content": "# hello",
+        "source_type": source_type,
+        "source_path": "/docs/doc.md",
+        "tags": ["sdlc:doc:spec"],
+    }
+
+
+class TestFlushEventBufferRouting:
+    """``_flush_event_buffer`` partitions buffered rows and routes each group
+    to its own endpoint (observations/batch vs. documents/ingest/batch)."""
+
+    def test_mixed_payload_type_rows_route_to_correct_endpoints(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        _seed_buffer_row(conn, _observation_payload(1), "observation")
+        _seed_buffer_row(conn, _document_payload(), "document")
+        conn.close()
+
+        calls: list[str] = []
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            calls.append(url)
+            if "observations/batch" in url:
+                return (200, b'{"ok":true}')
+            if "documents/ingest/batch" in url:
+                body = json.loads(payload.decode("utf-8"))
+                results = [
+                    {"index": i, "title": d["title"], "status": "created"}
+                    for i, d in enumerate(body["documents"])
+                ]
+                return (200, json.dumps({"results": results}).encode("utf-8"))
+            return (200, b"{}")
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        assert any("observations/batch" in c for c in calls)
+        assert any("documents/ingest/batch" in c for c in calls)
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining = conn2.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
+            assert remaining == 0
+        finally:
+            conn2.close()
+
+    def test_legacy_null_payload_type_rows_sniffed_and_routed(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        _seed_buffer_row(conn, _observation_payload(2), None)
+        _seed_buffer_row(conn, _document_payload(title="legacy.md"), None)
+        conn.close()
+
+        obs_calls: list[dict[str, object]] = []
+        doc_calls: list[dict[str, object]] = []
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            body = json.loads(payload.decode("utf-8"))
+            if "observations/batch" in url:
+                obs_calls.append(body)
+                return (200, b'{"ok":true}')
+            if "documents/ingest/batch" in url:
+                doc_calls.append(body)
+                results = [
+                    {"index": i, "title": d["title"], "status": "created"}
+                    for i, d in enumerate(body["documents"])
+                ]
+                return (200, json.dumps({"results": results}).encode("utf-8"))
+            return (200, b"{}")
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        assert len(obs_calls) == 1
+        assert len(doc_calls) == 1
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining = conn2.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
+            assert remaining == 0
+        finally:
+            conn2.close()
+
+    def test_unclassifiable_row_isolated_does_not_block_others(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        # Ambiguous: no observation keys, no document keys.
+        _seed_buffer_row(conn, {"foo": "bar"}, None)
+        good_obs_id = _seed_buffer_row(conn, _observation_payload(3), "observation")
+        conn.close()
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            if "observations/batch" in url:
+                return (200, b'{"ok":true}')
+            return (200, b"{}")
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining_ids = {
+                row[0] for row in conn2.execute("SELECT id FROM event_buffer").fetchall()
+            }
+            assert good_obs_id not in remaining_ids, "delivered observation should be deleted"
+            assert len(remaining_ids) == 1, "ambiguous row must be left in place, not dropped"
+        finally:
+            conn2.close()
+
+    def test_invalid_document_row_isolated_siblings_still_deliver(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        bad_doc = _document_payload()
+        del bad_doc["content"]  # missing required field
+        bad_id = _seed_buffer_row(conn, bad_doc, "document")
+        good_id = _seed_buffer_row(conn, _document_payload(title="good.md"), "document")
+        conn.close()
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            body = json.loads(payload.decode("utf-8"))
+            results = [
+                {"index": i, "title": d["title"], "status": "created"}
+                for i, d in enumerate(body["documents"])
+            ]
+            return (200, json.dumps({"results": results}).encode("utf-8"))
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining_ids = {
+                row[0] for row in conn2.execute("SELECT id FROM event_buffer").fetchall()
+            }
+            assert bad_id in remaining_ids, "malformed document row must remain buffered"
+            assert good_id not in remaining_ids, "valid sibling should still be delivered"
+        finally:
+            conn2.close()
+
+    def test_invalid_source_type_isolated(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        bad_id = _seed_buffer_row(
+            conn, _document_payload(source_type="not-a-real-type"), "document"
+        )
+        conn.close()
+
+        calls: list[str] = []
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            calls.append(url)
+            return (200, b'{"results":[]}')
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        assert calls == [], "invalid source_type row must never reach the POST"
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining_ids = {
+                row[0] for row in conn2.execute("SELECT id FROM event_buffer").fetchall()
+            }
+            assert bad_id in remaining_ids
+        finally:
+            conn2.close()
+
+    def test_error_status_items_remain_buffered(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        error_id = _seed_buffer_row(conn, _document_payload(title="fails.md"), "document")
+        ok_id = _seed_buffer_row(conn, _document_payload(title="ok.md"), "document")
+        conn.close()
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            body = json.loads(payload.decode("utf-8"))
+            results = []
+            for i, d in enumerate(body["documents"]):
+                status = "error" if d["title"] == "fails.md" else "created"
+                results.append({"index": i, "title": d["title"], "status": status})
+            return (200, json.dumps({"results": results}).encode("utf-8"))
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining_ids = {
+                row[0] for row in conn2.execute("SELECT id FROM event_buffer").fetchall()
+            }
+            assert error_id in remaining_ids, "error-status document row must remain buffered"
+            assert ok_id not in remaining_ids, "created-status document row must be deleted"
+        finally:
+            conn2.close()
+
+    def test_all_observation_buffer_regression_unchanged(self, tmp_path: Path) -> None:
+        """An all-observation buffer flushes identically to pre-payload_type behavior."""
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        for i in range(3):
+            _seed_buffer_row(conn, _observation_payload(i), "observation")
+        conn.close()
+
+        posted: list[dict[str, object]] = []
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            posted.append(json.loads(payload.decode("utf-8")))
+            return (200, b'{"ok":true}')
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        assert len(posted) == 1
+        assert len(posted[0]["observations"]) == 3
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            remaining = conn2.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
+            assert remaining == 0
+        finally:
+            conn2.close()
+
+    def test_document_group_chunked_at_50(self, tmp_path: Path) -> None:
+        """Document rows beyond 50 are POSTed as a second chunk."""
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+        for i in range(60):
+            _seed_buffer_row(conn, _document_payload(title=f"doc-{i}.md"), "document")
+        conn.close()
+
+        chunk_sizes: list[int] = []
+
+        def _fake_post(
+            url: str, headers: dict[str, str], payload: bytes, timeout: float
+        ) -> tuple[int, bytes] | None:
+            body = json.loads(payload.decode("utf-8"))
+            chunk_sizes.append(len(body["documents"]))
+            results = [
+                {"index": i, "title": d["title"], "status": "created"}
+                for i, d in enumerate(body["documents"])
+            ]
+            return (200, json.dumps({"results": results}).encode("utf-8"))
+
+        with patch("pyhooks.session_start._http.post_json", side_effect=_fake_post):
+            _ss_mod._flush_event_buffer(db_path, "http://localhost:19999", "test-key")
+
+        assert chunk_sizes == [50, 10]
 
 
 class TestGitignoreManagement:

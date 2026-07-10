@@ -324,6 +324,62 @@ class TestEventBuffer:
             conn2.close()
 
 
+class TestEventBufferPayloadType:
+    """Buffered observation rows are tagged payload_type='observation'."""
+
+    def test_buffered_row_tagged_observation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        conn = _db_mod.open_db(db_path)
+        assert conn is not None
+
+        workspace_key = str(tmp_path.resolve())
+        monkeypatch.chdir(tmp_path)
+        _seed_session(conn, workspace_key, last_submit_ms=0)
+        conn.close()
+
+        stdin_data = _make_event("Write")
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "test-key")
+        monkeypatch.setenv("NEUROLOOM_API_BASE", "http://localhost:19999")
+
+        with (
+            patch("pyhooks.capture.load") as mock_load,
+            patch("pyhooks.capture.open_db") as mock_open_db,
+            patch("pyhooks.capture.post_json", return_value=None),
+            patch("pyhooks.capture.sys.stdin", io.StringIO(stdin_data)),
+        ):
+            import pyhooks.config as _config_mod
+
+            mock_load.return_value = _config_mod.Config(
+                api_key="test-key",
+                api_base="http://localhost:19999",
+                state_db_path=db_path,
+            )
+            mock_open_db.side_effect = _real_open_db
+
+            try:
+                _capture_mod.main()
+            except SystemExit:
+                pass
+
+        import threading
+
+        for t in threading.enumerate():
+            if t is not threading.current_thread():
+                t.join(timeout=2.0)
+
+        conn2 = _db_mod.open_db(db_path)
+        assert conn2 is not None
+        try:
+            row = conn2.execute("SELECT payload_type FROM event_buffer").fetchone()
+            assert row is not None
+            assert row["payload_type"] == "observation"
+        finally:
+            conn2.close()
+
+
 class TestEventBufferCap:
     """The event_buffer is trimmed to 8,000 rows once it exceeds 10,000."""
 
@@ -396,3 +452,144 @@ class TestNoApiKey:
                 pass
 
         assert open_db_calls == [], "open_db should not be called when no API key is configured"
+
+
+class TestTruncatePayloadFields:
+    """Oversized content fields are truncated in place before serialization."""
+
+    def test_tool_input_content_truncated_for_write(self) -> None:
+        big = "x" * 20_000
+        data: dict[str, Any] = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x.py", "content": big},
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        tool_input = data["tool_input"]
+        assert isinstance(tool_input, dict)
+        content = tool_input["content"]
+        assert isinstance(content, str)
+        assert len(content) == _capture_mod._TRUNCATE_CAP + len(
+            f"…[truncated: original {len(big)} chars]"
+        )
+        assert content.startswith("x" * _capture_mod._TRUNCATE_CAP)
+        assert f"original {len(big)} chars" in content
+        # file_path is never truncated regardless of length.
+        assert tool_input["file_path"] == "/tmp/x.py"
+
+    def test_tool_input_new_string_old_string_truncated_for_edit(self) -> None:
+        big_new = "n" * 15_000
+        big_old = "o" * 15_000
+        data: dict[str, Any] = {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "/tmp/x.py",
+                "old_string": big_old,
+                "new_string": big_new,
+            },
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        tool_input = data["tool_input"]
+        assert isinstance(tool_input, dict)
+        assert len(tool_input["old_string"]) == _capture_mod._TRUNCATE_CAP + len(
+            f"…[truncated: original {len(big_old)} chars]"
+        )
+        assert len(tool_input["new_string"]) == _capture_mod._TRUNCATE_CAP + len(
+            f"…[truncated: original {len(big_new)} chars]"
+        )
+
+    def test_tool_input_new_source_truncated_for_notebook_edit(self) -> None:
+        big_source = "s" * 12_000
+        data: dict[str, Any] = {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": "/tmp/nb.ipynb",
+                "cell_id": "abc123",
+                "new_source": big_source,
+                "cell_type": "code",
+            },
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        tool_input = data["tool_input"]
+        assert isinstance(tool_input, dict)
+        assert len(tool_input["new_source"]) == _capture_mod._TRUNCATE_CAP + len(
+            f"…[truncated: original {len(big_source)} chars]"
+        )
+        # Routing/identity fields are never touched.
+        assert tool_input["notebook_path"] == "/tmp/nb.ipynb"
+        assert tool_input["cell_id"] == "abc123"
+
+    def test_tool_response_content_fields_truncated(self) -> None:
+        big = "y" * 13_000
+        data: dict[str, Any] = {
+            "tool_name": "Edit",
+            "tool_response": {
+                "filePath": "/tmp/x.py",
+                "oldString": "o" * 13_000,
+                "newString": big,
+                "originalFile": "f" * 13_000,
+                "structuredPatch": [{"lines": ["a", "b"]}],
+            },
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        tool_response = data["tool_response"]
+        assert isinstance(tool_response, dict)
+        assert len(tool_response["newString"]) == _capture_mod._TRUNCATE_CAP + len(
+            f"…[truncated: original {len(big)} chars]"
+        )
+        # filePath (routing) and structuredPatch (non-string, structured) untouched.
+        assert tool_response["filePath"] == "/tmp/x.py"
+        assert tool_response["structuredPatch"] == [{"lines": ["a", "b"]}]
+
+    def test_short_field_byte_identical_no_marker(self) -> None:
+        short = "short content"
+        data: dict[str, Any] = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x.py", "content": short},
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        tool_input = data["tool_input"]
+        assert isinstance(tool_input, dict)
+        assert tool_input["content"] == short
+        assert "truncated" not in tool_input["content"]
+
+    def test_never_truncate_fields_untouched_regardless_of_length(self) -> None:
+        long_path = "/" + ("a" * 20_000)
+        data: dict[str, Any] = {
+            "tool_name": "Write",
+            "agent_id": "b" * 20_000,
+            "tool_input": {"file_path": long_path, "content": "short"},
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        assert data["agent_id"] == "b" * 20_000
+        tool_input = data["tool_input"]
+        assert isinstance(tool_input, dict)
+        assert tool_input["file_path"] == long_path
+
+    def test_missing_tool_input_and_tool_response_is_noop(self) -> None:
+        data: dict[str, Any] = {"tool_name": "Bash", "command": "ls -la"}
+        _capture_mod._truncate_payload_fields(data)
+        assert data == {"tool_name": "Bash", "command": "ls -la"}
+
+    def test_non_dict_tool_input_is_noop(self) -> None:
+        data: dict[str, Any] = {"tool_name": "Bash", "tool_input": "not-a-dict"}
+        _capture_mod._truncate_payload_fields(data)
+        assert data["tool_input"] == "not-a-dict"
+
+    def test_output_round_trips_through_json(self) -> None:
+        big = "z" * 30_000
+        data: dict[str, Any] = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x.py", "content": big},
+            "tool_response": {"filePath": "/tmp/x.py", "content": "r" * 30_000},
+        }
+        _capture_mod._truncate_payload_fields(data)
+
+        serialized = json.dumps(data, separators=(",", ":"))
+        round_tripped = json.loads(serialized)
+        assert round_tripped == data

@@ -95,6 +95,24 @@ _START_SESSION_TIMEOUT = 3.0
 # Timeout (seconds) for the event-buffer flush API call.
 _FLUSH_TIMEOUT = 5.0
 
+# Max items per /documents/ingest/batch request — mirrors the API's
+# DocumentIngestBatchRequest.documents max_length=50 /
+# document_ingestion_service._MAX_BATCH_ITEMS. Keep in sync with
+# api/neuroloom_api/schemas/document.py if that cap ever changes.
+_DOCUMENT_BATCH_MAX = 50
+
+# Valid SourceType enum values, mirrored from
+# api/neuroloom_api/models/document_source.py. Kept as a plain set here so
+# pyhooks does not import from the API package across the process boundary.
+_DOCUMENT_SOURCE_TYPES = {
+    "wiki",
+    "slack",
+    "document",
+    "sdlc_knowledge",
+    "sdlc_deliverable",
+    "sdlc_chronicle",
+}
+
 # Timeout (seconds) for the PyPI version check.
 _PYPI_TIMEOUT = 5.0
 
@@ -482,13 +500,138 @@ def _prune_traces(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _row_payload_kind(payload_type: str | None, parsed: dict[str, object]) -> str | None:
+    """
+    Classify a buffered row as ``"observation"``, ``"document"``, or ``None``
+    (ambiguous — leave in place).
+
+    Rows written by the current capture.py/post_tool_use.py always carry an
+    explicit payload_type. Rows written before this marker existed have
+    payload_type ``None`` and are classified by structural sniffing instead.
+    """
+    if payload_type == "observation":
+        return "observation"
+    if payload_type == "document":
+        return "document"
+
+    # Legacy row (payload_type IS NULL) — sniff structurally. Observation
+    # payloads always carry these three keys (see capture.py's single_obs
+    # dict); document payloads always carry source_type/source_path (see
+    # sdlc_pyhooks/post_tool_use.py's payload_dict).
+    if "observation_id" in parsed and "session_id" in parsed and "observed_at" in parsed:
+        return "observation"
+    if "source_type" in parsed and "source_path" in parsed:
+        return "document"
+    return None
+
+
+def _document_row_is_valid(doc: dict[str, object]) -> bool:
+    """
+    Client-side shape check mirroring DocumentIngestRequest's required fields.
+
+    Pydantic validates the entire ``documents`` list before the route
+    handler's per-item SAVEPOINT loop runs, so a single row missing a required
+    field would 422 the whole sub-batch. Checking shape here keeps a bad row
+    from blocking delivery of its siblings. Covers only the three required
+    fields (title, content, source_type) — optional fields are not shape
+    checked, an accepted low-risk gap since post_tool_use.py only ever emits
+    well-formed optional fields.
+    """
+    title = doc.get("title")
+    content = doc.get("content")
+    source_type = doc.get("source_type")
+    return (
+        isinstance(title, str)
+        and title != ""
+        and isinstance(content, str)
+        and content != ""
+        and source_type in _DOCUMENT_SOURCE_TYPES
+    )
+
+
+def _flush_observation_group(
+    conn: sqlite3.Connection,
+    api_base: str,
+    api_key: str,
+    row_ids: list[int],
+    observations: list[object],
+) -> None:
+    """
+    POST the observation group to /observations/batch — behavior unchanged
+    from before payload_type existed. All-or-nothing deletion on 2xx;
+    ObservationBatch's own item-level dedup handles duplicates safely on retry.
+    """
+    payload = json.dumps({"observations": observations}).encode("utf-8")
+    url = f"{api_base}/api/v1/observations/batch"
+    result = _http.post_json(url, _auth_headers(api_key), payload, timeout=_FLUSH_TIMEOUT)
+
+    if result is not None and 200 <= result[0] < 300:
+        placeholders = ",".join("?" * len(row_ids))
+        conn.execute(
+            "DELETE FROM event_buffer WHERE id IN (" + placeholders + ")",
+            row_ids,
+        )
+        conn.commit()
+
+
+def _flush_document_group(
+    conn: sqlite3.Connection,
+    api_base: str,
+    api_key: str,
+    row_ids: list[int],
+    documents: list[dict[str, object]],
+) -> None:
+    """
+    POST the document group to /documents/ingest/batch, chunked to
+    _DOCUMENT_BATCH_MAX items (the API caps DocumentIngestBatchRequest.documents
+    at 50). Only rows whose corresponding batch-response item is not "error"
+    are deleted; "error" items remain buffered (bounded by the row-cap trim
+    applied earlier in _flush_event_buffer). A chunk that fails outright
+    (network error, non-2xx, or an unparseable response body) is left in the
+    buffer entirely for the next flush cycle.
+    """
+    url = f"{api_base}/api/v1/documents/ingest/batch"
+
+    for start in range(0, len(documents), _DOCUMENT_BATCH_MAX):
+        chunk_ids = row_ids[start : start + _DOCUMENT_BATCH_MAX]
+        chunk_docs = documents[start : start + _DOCUMENT_BATCH_MAX]
+
+        payload = json.dumps({"documents": chunk_docs}).encode("utf-8")
+        result = _http.post_json(url, _auth_headers(api_key), payload, timeout=_FLUSH_TIMEOUT)
+
+        if result is None or not (200 <= result[0] < 300):
+            continue
+
+        try:
+            body = json.loads(result[1].decode("utf-8"))
+            results = body.get("results", [])
+        except Exception:
+            continue
+
+        delete_ids = [
+            chunk_ids[item["index"]]
+            for item in results
+            if isinstance(item, dict)
+            and isinstance(item.get("index"), int)
+            and 0 <= item["index"] < len(chunk_ids)
+            and item.get("status") != "error"
+        ]
+        if delete_ids:
+            placeholders = ",".join("?" * len(delete_ids))
+            conn.execute(
+                "DELETE FROM event_buffer WHERE id IN (" + placeholders + ")",
+                delete_ids,
+            )
+            conn.commit()
+
+
 def _flush_event_buffer(
     db_path: Path,
     api_base: str,
     api_key: str,
 ) -> None:
     """
-    Step 7 — flush buffered observation events to the API.
+    Step 7 — flush buffered observation and document events to the API.
 
     Opens its own SQLite connection so it is safe to run in a background thread
     (SQLite connections must not be shared across threads).
@@ -497,8 +640,13 @@ def _flush_event_buffer(
     _EVENT_BUFFER_TRIM rows first (dropping the oldest entries) to prevent
     unbounded growth when the API is persistently unavailable.
 
-    Rows are sent in a single batch POST.  On success they are deleted from the
-    buffer.  On failure they are left in place for the next startup to retry.
+    Rows are partitioned by payload_type (observation vs. document, with
+    structural sniffing for legacy NULL rows) and routed to their own
+    endpoint — a buffered document row previously failed Pydantic validation
+    for the entire /observations/batch payload, stranding every legitimate
+    buffered observation alongside it. Rows that can't be classified, or that
+    fail the document shape check, are left in the buffer and logged rather
+    than dropped or allowed to poison the whole flush.
     """
     conn: sqlite3.Connection | None = None
     try:
@@ -516,35 +664,47 @@ def _flush_event_buffer(
             )
             conn.commit()
 
-        rows = conn.execute("SELECT id, payload FROM event_buffer ORDER BY id ASC").fetchall()
+        rows = conn.execute(
+            "SELECT id, payload, payload_type FROM event_buffer ORDER BY id ASC"
+        ).fetchall()
 
         if not rows:
             return
 
+        observation_ids: list[int] = []
         observations: list[object] = []
-        row_ids: list[int] = []
+        document_ids: list[int] = []
+        documents: list[dict[str, object]] = []
 
         for row in rows:
-            row_ids.append(row["id"])
+            row_id = int(row["id"])
             try:
-                observations.append(json.loads(row["payload"]))
+                parsed = json.loads(row["payload"])
             except Exception:
-                # Malformed payload — skip it but still delete the row on success
-                # so it does not block future flushes.
-                observations.append({"raw": row["payload"]})
+                _trace.write(conn, _SCRIPT, "buffer_row_unparseable", detail=f"id={row_id}")
+                continue
+            if not isinstance(parsed, dict):
+                _trace.write(conn, _SCRIPT, "buffer_row_unparseable", detail=f"id={row_id}")
+                continue
 
-        payload = json.dumps({"observations": observations}).encode("utf-8")
-        url = f"{api_base}/api/v1/observations/batch"
-        result = _http.post_json(url, _auth_headers(api_key), payload, timeout=_FLUSH_TIMEOUT)
+            kind = _row_payload_kind(row["payload_type"], parsed)
+            if kind == "observation":
+                observation_ids.append(row_id)
+                observations.append(parsed)
+            elif kind == "document":
+                if _document_row_is_valid(parsed):
+                    document_ids.append(row_id)
+                    documents.append(parsed)
+                else:
+                    _trace.write(conn, _SCRIPT, "buffer_row_invalid_document", detail=f"id={row_id}")
+            else:
+                _trace.write(conn, _SCRIPT, "buffer_row_ambiguous", detail=f"id={row_id}")
 
-        if result is not None and 200 <= result[0] < 300:
-            # Delete only the rows we successfully sent.
-            placeholders = ",".join("?" * len(row_ids))
-            conn.execute(
-                "DELETE FROM event_buffer WHERE id IN (" + placeholders + ")",
-                row_ids,
-            )
-            conn.commit()
+        if observations:
+            _flush_observation_group(conn, api_base, api_key, observation_ids, observations)
+
+        if documents:
+            _flush_document_group(conn, api_base, api_key, document_ids, documents)
     except Exception:
         pass  # never crash — hook design constraint
     finally:

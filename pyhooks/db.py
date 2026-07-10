@@ -111,6 +111,34 @@ CREATE TABLE IF NOT EXISTS config (
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Apply the full schema idempotently.  Safe to call on every open."""
     conn.executescript(_SCHEMA)
+    _ensure_event_buffer_payload_type(conn)
+
+
+def _ensure_event_buffer_payload_type(conn: sqlite3.Connection) -> None:
+    """
+    Additive migration: add the ``payload_type`` column to ``event_buffer`` if
+    missing, so old and new event_buffer rows can be told apart on flush.
+
+    The PRAGMA check-then-ALTER sequence below is a check-then-act race: two
+    hook processes can both see the column absent and both attempt the ALTER,
+    and the loser raises ``sqlite3.OperationalError: duplicate column name``.
+    WAL mode and the busy timeout do not close this race — they only serialize
+    writes, not this check-then-act sequence. The PRAGMA check is kept as a
+    fast-path optimization; the try/except around ALTER is the actual guard,
+    treating "duplicate column name" as a successful idempotent no-op and
+    re-raising any other OperationalError unchanged.
+    """
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(event_buffer)").fetchall()
+    }
+    if "payload_type" in columns:
+        return
+
+    try:
+        conn.execute("ALTER TABLE event_buffer ADD COLUMN payload_type TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 def open_db(path: Path) -> sqlite3.Connection | None:

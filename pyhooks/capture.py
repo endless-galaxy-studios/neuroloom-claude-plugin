@@ -51,6 +51,71 @@ _BUFFER_TRIM_TARGET = 8_000
 # call itself, not the hook latency.
 _HTTP_TIMEOUT = 5.0
 
+# Per-field truncation cap applied to large content-bearing fields before
+# serialization.  Must exceed the server's extraction read-depth (up to 8 000
+# chars, see _clean_observation_content(..., max_chars=8000) in the API) so no
+# legitimate content is lost before extraction runs.
+_TRUNCATE_CAP = 10_000
+
+# Content-bearing keys inside tool_input truncated before serialization.
+# Verified against real captured PostToolUse events for Write and Edit in
+# api/scripts/fixtures/d87_eval_fixtures.json (observation_content field —
+# genuine stdin payloads captured during real sessions): Write's tool_input
+# has exactly {file_path, content}; Edit's has exactly
+# {file_path, old_string, new_string, replace_all}. file_path / notebook_path
+# / cell_id / cell_type / edit_mode are deliberately excluded — routing/
+# identity fields, not content.
+#
+# new_source (NotebookEdit) is included even though no NotebookEdit example
+# was found in either fixture file to confirm it: it is NotebookEdit's
+# documented content-carrying field and can be just as large as an Edit's
+# new_string. Truncated defensively — the isinstance guard below makes a wrong
+# key name a silent no-op, never a crash, if this guess turns out incorrect.
+_TOOL_INPUT_TRUNCATE_KEYS = ("content", "new_string", "old_string", "new_source")
+
+# Content-bearing keys inside tool_response truncated before serialization.
+# Verified against the same real captured events: Write's tool_response has
+# exactly {type, filePath, content, structuredPatch, originalFile}; Edit's has
+# exactly {filePath, oldString, newString, originalFile, structuredPatch,
+# userModified, replaceAll}. filePath / structuredPatch / userModified /
+# replaceAll / type are deliberately excluded — routing fields or non-string
+# structured data, not content. newSource (NotebookEdit) is an unverified,
+# defensive addition for the same reason as new_source above.
+_TOOL_RESPONSE_TRUNCATE_KEYS = ("content", "oldString", "newString", "originalFile", "newSource")
+
+
+def _truncate_str(value: str) -> str:
+    """Truncate *value* to _TRUNCATE_CAP chars, appending a size marker if cut."""
+    if len(value) <= _TRUNCATE_CAP:
+        return value
+    return value[:_TRUNCATE_CAP] + f"…[truncated: original {len(value)} chars]"
+
+
+def _truncate_payload_fields(data: dict[str, object]) -> None:
+    """
+    Truncate oversized content fields of a parsed PostToolUse event in place.
+
+    Only targets known content-bearing keys inside tool_input/tool_response —
+    never touches routing/identity fields (file_path, tool_name, session_id,
+    etc). isinstance guards at every hop make an absent or unexpected shape a
+    silent no-op, matching the hook's never-crash design constraint. Must run
+    on the parsed dict before json.dumps — truncating the serialized JSON
+    string would corrupt structure.
+    """
+    tool_input = data.get("tool_input")
+    if isinstance(tool_input, dict):
+        for key in _TOOL_INPUT_TRUNCATE_KEYS:
+            value = tool_input.get(key)
+            if isinstance(value, str):
+                tool_input[key] = _truncate_str(value)
+
+    tool_response = data.get("tool_response")
+    if isinstance(tool_response, dict):
+        for key in _TOOL_RESPONSE_TRUNCATE_KEYS:
+            value = tool_response.get(key)
+            if isinstance(value, str):
+                tool_response[key] = _truncate_str(value)
+
 
 # ---------------------------------------------------------------------------
 # Background worker
@@ -94,8 +159,8 @@ def _submit(
 
         if conn is not None:
             conn.execute(
-                "INSERT INTO event_buffer (payload, created_at) VALUES (?, ?)",
-                (single_obs_json, time.time()),
+                "INSERT INTO event_buffer (payload, created_at, payload_type) VALUES (?, ?, ?)",
+                (single_obs_json, time.time(), "observation"),
             )
             conn.commit()
 
@@ -223,6 +288,7 @@ def main() -> None:
         # -------------------------------------------------------------- 10
         observation_id = str(uuid.uuid4())
         observed_at = datetime.now(timezone.utc).isoformat()
+        _truncate_payload_fields(data)
         content_str = json.dumps(data, separators=(",", ":"))
 
         single_obs: dict[str, object] = {
