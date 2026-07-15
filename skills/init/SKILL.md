@@ -269,14 +269,14 @@ Every memory item requires a `memory_type`. Use exactly one of these values:
 | Explicit design decisions from README, ADRs, or code comments | `decision` |
 | Auth, secrets management, permission models, security patterns | `convention` or `pattern` |
 | Performance-critical code, optimization notes, caching layers | `discovery` or `pattern` |
-| Documentation files, API docs, README sections | `wiki` |
+| Documentation files, API docs, README sections | `general` |
 | Concepts, domain knowledge, or explanatory context | `discovery` |
 | Something broke and was fixed; failure mode and resolution | `incident` |
 | Debugging insights and non-obvious runtime behaviors | `discovery` |
 | Refactoring decisions and rationale | `decision` |
 | Anything that does not fit the above categories | `general` |
 
-Do not invent other values. The full set of valid `memory_type` values is: `decision`, `pattern`, `convention`, `architecture`, `discovery`, `incident`, `general`, `wiki`, `sdlc_knowledge`. The table above covers the types most commonly needed during init. Do not use `document`, `file`, `code`, or any other string not in the valid set.
+Do not invent other values. The valid `memory_type` values for `memory_store_batch` are: `decision`, `pattern`, `convention`, `architecture`, `discovery`, `incident`, `general`. The table above covers the types most commonly needed during init. Do not use `document`, `file`, `code`, or any other string not in this set. `wiki` and `sdlc_knowledge` are system-managed types and cannot be set via `memory_store_batch` — the API rejects them with HTTP 422.
 
 ### `memory_store_batch` Parameter Reference
 
