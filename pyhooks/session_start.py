@@ -140,6 +140,27 @@ Don't have a key? Get one at https://app.neuroloom.dev/settings/api-keys
 Restart your Claude Code session after configuring to activate memory.
 """
 
+# Printed once per session start when workspace auto-configuration returns
+# WORKSPACE_ID_AMBIGUOUS (D167 Phase 6 / F15) — the caller has 2+ workspace
+# memberships and none can be auto-picked. Unlike a transient network
+# failure, this will not resolve itself on retry, so it gets an explicit,
+# actionable message pointing at the one manual-override mechanism that
+# actually works: the per-project pluginConfigs.workspace_id option (NOT
+# .mcp.json directly — that file is the shared plugin manifest and editing
+# it leaks the override across every project using this plugin).
+_AMBIGUOUS_WORKSPACE_MESSAGE = """\
+[Neuroloom plugin] Workspace could not be auto-configured.
+
+You belong to more than one Neuroloom workspace, so the plugin can't tell \
+which one this project should use.
+
+Set it manually in this project's .claude/settings.json:
+  pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id = "<workspace-id>"
+
+Find your workspace IDs at https://app.neuroloom.dev, then restart your \
+Claude Code session to pick up the change.
+"""
+
 # The CLAUDE.md injection block.
 _CLAUDEMD_BLOCK = """\
 
@@ -820,12 +841,21 @@ def main() -> None:
         # header.  Non-fatal — a failure here does not block the session.
         # Skip when there is no API key (guard already returned above) or
         # when the MCP server is not the active connection mode.
-        _workspace_config.ensure_workspace_configured(
+        #
+        # WORKSPACE_ID_AMBIGUOUS is the one outcome that is not transient —
+        # a multi-membership caller with no configured workspace_id won't
+        # resolve itself on the next session start, so (only) this case
+        # gets a user-facing message. Plain None (network/unreachable/
+        # unrecognized-error-shape) stays silent, matching prior behavior.
+        workspace_result = _workspace_config.ensure_workspace_configured(
             project_root=cwd,
             db_path=cfg.state_db_path,
             api_base=cfg.api_base,
             api_key=cfg.api_key,
         )
+        if workspace_result == _workspace_config.WORKSPACE_ID_AMBIGUOUS:
+            print(_AMBIGUOUS_WORKSPACE_MESSAGE, end="")
+            _trace.write(conn, _SCRIPT, "workspace_ambiguous")
 
         # Step 9 — .gitignore management.
         _ensure_gitignore(cwd)

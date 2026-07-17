@@ -82,7 +82,7 @@ After the API key is verified (or was already present), run the workspace auto-c
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pathlib import Path
-from pyhooks.workspace_config import ensure_workspace_configured
+from pyhooks.workspace_config import ensure_workspace_configured, WORKSPACE_ID_AMBIGUOUS
 import os
 
 project_root = os.getcwd()
@@ -105,14 +105,20 @@ ws = ensure_workspace_configured(
     api_base='https://api.neuroloom.dev',
     api_key=api_key,
 )
-print(f'workspace:{ws}' if ws else 'workspace:none')
+if ws == WORKSPACE_ID_AMBIGUOUS:
+    print('workspace:ambiguous')
+elif ws:
+    print(f'workspace:{ws}')
+else:
+    print('workspace:none')
 "
 ```
 
 - If the output contains `workspace:` followed by a UUID → Print `Workspace configured: [UUID]. All MCP requests will route to this workspace.`
+- If the output is `workspace:ambiguous` → Print `You belong to multiple workspaces — set pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id in .claude/settings.json to pick one, then restart your session.` Continue to Phase 1.
 - If the output is `workspace:none` → Print `Could not determine workspace — it will be configured on next session start.` Continue to Phase 1.
 
-This step writes the `X-Workspace-Id` header into your project's `.mcp.json`, enabling per-project workspace routing. If you have multiple workspaces and want this project to use a different one, edit the `X-Workspace-Id` value in `.mcp.json`.
+This step writes the `X-Workspace-Id` header into your project's MCP requests by setting `pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id` in this project's `.claude/settings.json` — Claude Code substitutes that value into the plugin's `.mcp.json` header template (`${user_config.workspace_id}`) at runtime. If you have multiple workspaces and want this project to use a different one, edit `options.workspace_id` in `.claude/settings.json`, NOT `.mcp.json` — `.mcp.json` is the shared plugin manifest and editing it directly leaks the override across every project using this plugin.
 
 ---
 
