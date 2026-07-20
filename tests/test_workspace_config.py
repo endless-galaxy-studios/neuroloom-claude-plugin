@@ -586,6 +586,150 @@ class TestResidueMigration:
         assert second.migrated_residue_value is None
         assert second.override_applied is False
 
+        # The one-time residue-check marker is now set.
+        assert _wc._is_residue_check_done(db_path)
+
+    def test_residue_check_marker_set_on_first_call_with_no_override(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        (a) — the marker must be set the first time the C1 block runs even
+        when there was no override present at all (the inconclusive/no-op
+        case), not only when a migration actually occurred.
+        """
+        project_root = str(tmp_path)
+        db_path = tmp_path / ".neuroloom.db"
+        _init_db(db_path)
+        api_key = "key-no-override"
+
+        assert not _wc._is_residue_check_done(db_path)
+
+        result = _wc.ensure_workspace_configured_detailed(
+            project_root=project_root,
+            db_path=db_path,
+            api_base=_dead_api_base(),
+            api_key=api_key,
+        )
+        assert result.migrated_residue_value is None
+        assert result.override_applied is False
+        assert _wc._is_residue_check_done(db_path)
+
+    def test_override_matching_cache_survives_after_first_session_migration_check(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Regression test for the live production bug: a user whose account's
+        bootstrap-resolved default workspace equals the workspace they want
+        to pin their project to. Before this fix, the C1 equality check
+        re-ran identically on every session and deleted the override as
+        "residue" forever, making it impossible to ever successfully pin a
+        project to one's own default workspace.
+
+        Sequence mirrors the real-world (ChronoCore) case: the first
+        post-upgrade session runs with no override present yet (so the
+        one-time residue check has nothing to migrate and simply marks
+        itself done). The user then sets an override equal to their
+        account's default. A second session must trust it — not delete it.
+        """
+        project_root = str(tmp_path)
+        db_path = tmp_path / ".neuroloom.db"
+        _init_db(db_path)
+        cached_uuid = "66666666-6666-6666-6666-666666666666"
+        api_key = "key-survives"
+
+        # First post-upgrade session: no override yet. Marker gets set,
+        # nothing to migrate.
+        first = _wc.ensure_workspace_configured_detailed(
+            project_root=project_root,
+            db_path=db_path,
+            api_base=_dead_api_base(),
+            api_key=api_key,
+        )
+        assert first.migrated_residue_value is None
+        assert _wc._is_residue_check_done(db_path)
+        # cached_default was never fetched (dead api_base) — sanity check
+        # that the db cache itself is empty so the next step's equality
+        # would have been "inconclusive" had the marker not been set.
+        assert _wc.load_workspace_id_from_db(db_path) is None
+
+        # Now seed the db cache to simulate a resolved bootstrap default,
+        # and have the user set an override equal to it.
+        _wc._save_workspace_id_to_db(db_path, cached_uuid)
+        _wc._save_config_value(
+            db_path, _wc._WORKSPACE_ID_FINGERPRINT_KEY, _wc._fingerprint_api_key(api_key)
+        )
+        _write_settings_override(project_root, cached_uuid)
+
+        second = _wc.ensure_workspace_configured_detailed(
+            project_root=project_root,
+            db_path=db_path,
+            api_base=_dead_api_base(),
+            api_key=api_key,
+        )
+
+        # The override must be trusted and applied, not deleted as residue.
+        assert second.migrated_residue_value is None
+        assert second.override_applied is True
+        assert second.workspace_id == cached_uuid
+        assert second.override_write_result == _wc.WriteResult.SUCCESS
+
+        entry = _read_mcp_json(project_root)["mcpServers"]["neuroloom"]
+        assert entry["headers"][_wc._WORKSPACE_HEADER] == cached_uuid
+
+        # The override key must still be present in settings.json.
+        settings_path = Path(project_root) / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        options = settings["pluginConfigs"][_wc._PLUGIN_ID]["options"]
+        assert options["workspace_id"] == cached_uuid
+
+    def test_migrated_residue_then_reapplied_override_survives_second_session(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Variant covering the case where the first call DID migrate genuine
+        residue (matching the original C1 scenario), and the user then
+        deliberately re-configures the same value as a real override
+        afterward — it must survive from that point on, never re-deleted.
+        """
+        project_root = str(tmp_path)
+        db_path = tmp_path / ".neuroloom.db"
+        _init_db(db_path)
+        residue_uuid = "77777777-7777-7777-7777-777777777777"
+        api_key = "key-remigrate"
+
+        _write_settings_override(project_root, residue_uuid)
+        _wc._save_workspace_id_to_db(db_path, residue_uuid)
+        _wc._save_config_value(
+            db_path, _wc._WORKSPACE_ID_FINGERPRINT_KEY, _wc._fingerprint_api_key(api_key)
+        )
+
+        first = _wc.ensure_workspace_configured_detailed(
+            project_root=project_root,
+            db_path=db_path,
+            api_base=_dead_api_base(),
+            api_key=api_key,
+        )
+        assert first.migrated_residue_value == residue_uuid
+        assert _wc._is_residue_check_done(db_path)
+
+        # User deliberately re-adds the same value as a genuine override.
+        _write_settings_override(project_root, residue_uuid)
+
+        second = _wc.ensure_workspace_configured_detailed(
+            project_root=project_root,
+            db_path=db_path,
+            api_base=_dead_api_base(),
+            api_key=api_key,
+        )
+        assert second.migrated_residue_value is None
+        assert second.override_applied is True
+        assert second.workspace_id == residue_uuid
+
+        settings_path = Path(project_root) / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        options = settings["pluginConfigs"][_wc._PLUGIN_ID]["options"]
+        assert options["workspace_id"] == residue_uuid
+
     def test_inconclusive_comparison_treated_as_genuine_override(self, tmp_path: Path) -> None:
         """
         No fingerprint-matched cache value to compare against (never

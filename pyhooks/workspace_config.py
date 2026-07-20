@@ -32,13 +32,26 @@ into a project-scope ``.mcp.json`` entry — but only under these conditions:
    Token-authenticated bootstrap call) is cached locally for other
    bookkeeping but is never written to any file.
 
-2. **Residue migration.** Released versions of this plugin (through the
-   version shipping this fix) wrote the auto-fetched default into the same
-   settings key a human override lives at. On first read after upgrading,
-   if the value found there exactly matches this session's fingerprint-
-   matched cached default, it's recognized as the plugin's own past write
-   (not a human's choice), deleted from ``.claude/settings.json``, and
-   treated as "no override" for the rest of the call.
+2. **Residue migration — one-time, then trust forever.** Released versions
+   of this plugin (through the version shipping this fix) wrote the
+   auto-fetched default into the same settings key a human override lives
+   at. This can only ever have happened once per project, before that
+   project's first session under this fix's code — nothing in this module
+   writes to that key anymore, so nothing can produce a fresh "residue"
+   after that point. Accordingly, the fingerprint-match comparison against
+   this session's cached default runs *exactly once per project*: the
+   first time it runs, if a value is found there that exactly matches the
+   cached default, it's recognized as the plugin's own past write (not a
+   human's choice), deleted from ``.claude/settings.json``, and treated as
+   "no override" for that call. A per-project marker in ``.neuroloom.db``
+   (``_RESIDUE_CHECK_DONE_KEY``) records that this one-time check has run,
+   set unconditionally the first time regardless of outcome. Every session
+   after that, any value present at the override key is trusted as genuine
+   human intent and is never re-examined for a fingerprint match — this is
+   what fixes the bug where a human override that happened to equal the
+   account's bootstrap-resolved default (a common case, e.g. pinning to
+   one's own primary workspace) was deleted as "residue" on every single
+   session, forever.
 
 3. **Headerless-by-default (ADR-13 conformance).** When no genuine override
    is configured, the project-scope ``.mcp.json`` entry this module ensures
@@ -134,7 +147,9 @@ _WORKSPACE_ID_KEY = "workspace_id"
 # (which may now belong to a different workspace) invalidates the cache
 # instead of the plugin trusting a stale workspace_id forever. Also used
 # (D169 / C1) as the comparison value that distinguishes a released
-# version's own residue from a genuine human override.
+# version's own residue from a genuine human override — but only during the
+# one-time-per-project residue check gated by _RESIDUE_CHECK_DONE_KEY (see
+# that constant and the module docstring's "Residue migration" section).
 _WORKSPACE_ID_FINGERPRINT_KEY = "workspace_id_key_fingerprint"
 
 # D169 (C4 fallback — see module docstring "Ownership marker design"):
@@ -144,6 +159,24 @@ _WORKSPACE_ID_FINGERPRINT_KEY = "workspace_id_key_fingerprint"
 # retroactively to an entry this module did not create.
 _MCP_ENTRY_OWNED_DB_KEY = "mcp_json_neuroloom_entry_owned"
 _MCP_ENTRY_OWNED_DB_VALUE = "1"
+
+# Hotfix (follow-up to D169 / C1): per-project flag in .neuroloom.db recording
+# that the C1 residue-vs-override equality check has already run once for
+# this project. The check is only ever safe to run *once*: after a project's
+# first session under D169-or-later code, nothing can ever again produce a
+# genuine auto-write at the override key (the code path that used to write
+# there was removed), so any later value found there is, by construction,
+# something a human typed. Without this marker, the equality check re-runs
+# identically on every session start and permanently deletes any override a
+# user sets that happens to equal their account's bootstrap-resolved default
+# workspace — an extremely common case (e.g. pinning to one's own primary
+# workspace) that produced an unbreakable delete-on-every-session loop. Set
+# unconditionally the first time the C1 block executes, regardless of
+# whether residue was found and migrated, no override was present, or the
+# comparison was inconclusive (no cached_default). See module docstring,
+# "Residue migration" for the full one-time-then-trust-forever framing.
+_RESIDUE_CHECK_DONE_KEY = "workspace_override_residue_check_done"
+_RESIDUE_CHECK_DONE_VALUE = "1"
 
 # F15: sentinel returned by ensure_workspace_configured when the API key
 # belongs to a caller with 2+ workspace memberships and no workspace_id can
@@ -364,6 +397,24 @@ def _mark_mcp_entry_owned(db_path: Path) -> None:
     retroactively on an entry this module did not itself create.
     """
     _save_config_value(db_path, _MCP_ENTRY_OWNED_DB_KEY, _MCP_ENTRY_OWNED_DB_VALUE)
+
+
+def _is_residue_check_done(db_path: Path) -> bool:
+    """
+    True if the C1 residue-vs-override equality check has already run once
+    for this project (hotfix follow-up to D169 / C1 — see
+    ``_RESIDUE_CHECK_DONE_KEY``).
+    """
+    return _load_config_value(db_path, _RESIDUE_CHECK_DONE_KEY) == _RESIDUE_CHECK_DONE_VALUE
+
+
+def _mark_residue_check_done(db_path: Path) -> None:
+    """
+    Record that the C1 residue-vs-override equality check has run once for
+    this project. Called unconditionally after the check executes, whether
+    or not residue was found — see ``_RESIDUE_CHECK_DONE_KEY``.
+    """
+    _save_config_value(db_path, _RESIDUE_CHECK_DONE_KEY, _RESIDUE_CHECK_DONE_VALUE)
 
 
 def _parse_ambiguous_error_body(raw_body: bytes) -> bool:
@@ -826,13 +877,21 @@ def ensure_workspace_configured_detailed(
        below all run unconditionally (C3) — none of them need an API key.
     2. Read a manual per-project override from ``.claude/settings.json``
        (``_read_manual_workspace_override``).
-    3. Residue check (C1): if a value was read and ``cached_default`` is
-       not None and the two are equal, this is the plugin's own prior
-       auto-write, not a human override — delete it from
-       ``.claude/settings.json`` and treat this call as "no override". If a
-       value was read but there is no ``cached_default`` to compare against
-       (never fetched, or the API key has since rotated), the comparison is
-       inconclusive and the value is trusted as a genuine override.
+    3. Residue check (C1) — one-time per project, then trust forever
+       (hotfix follow-up to D169 / C1): only performed while
+       ``_is_residue_check_done(db_path)`` is False. On that first run, if
+       a value was read and ``cached_default`` is not None and the two are
+       equal, this is the plugin's own prior auto-write, not a human
+       override — delete it from ``.claude/settings.json`` and treat this
+       call as "no override". If a value was read but there is no
+       ``cached_default`` to compare against (never fetched, or the API key
+       has since rotated), the comparison is inconclusive and the value is
+       trusted as a genuine override. Either way, the per-project marker is
+       set unconditionally once this block executes, so every later call
+       skips the comparison entirely and trusts whatever value is present
+       at the override key as genuine human intent — this is what stops a
+       genuine override that happens to equal ``cached_default`` from being
+       deleted as "residue" on every session forever.
     4. If a genuine (non-residue) override remains: write the literal
        header (``create_if_missing=True``). Only on ``WriteResult.SUCCESS``
        is the override considered "applied" and returned as the resolved
@@ -872,10 +931,12 @@ def ensure_workspace_configured_detailed(
     override = _read_manual_workspace_override(project_root)
 
     migrated_residue_value: str | None = None
-    if override is not None and cached_default is not None and override == cached_default:
-        if _delete_manual_workspace_override_key(project_root):
-            migrated_residue_value = override
-        override = None
+    if not _is_residue_check_done(db_path):
+        if override is not None and cached_default is not None and override == cached_default:
+            if _delete_manual_workspace_override_key(project_root):
+                migrated_residue_value = override
+            override = None
+        _mark_residue_check_done(db_path)
 
     if override is not None:
         write_result = _write_literal_mcp_json_entry(
