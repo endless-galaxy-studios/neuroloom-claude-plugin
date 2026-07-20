@@ -20,6 +20,7 @@ import pytest
 
 import pyhooks.db as _db_mod
 import pyhooks.session_start as _ss_mod
+import pyhooks.workspace_config as _wc_mod
 
 # Save a reference to the real open_db before any patches can shadow it.
 _real_open_db = _db_mod.open_db
@@ -1006,3 +1007,159 @@ def test_no_banner_on_happy_path(
         _ss_mod.main()
 
     assert "neuroloom-codeweaver could not be installed" not in output.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# D169 step-8 emission wiring — session_start.py's own print/.format() calls
+# for each WorkspaceConfigResult shape. test_workspace_config.py already
+# covers the *fields* (override_applied, migrated_residue_value,
+# baseline_write_result, override_write_result) that drive these prints; this
+# class covers the print/.format() wiring itself, which was previously
+# exercised only by inspection. A future rename of a message constant's
+# placeholder, or a `.value` access on the wrong type, would raise inside
+# main()'s un-guarded try block (only `finally` closes the DB — nothing
+# catches), aborting steps 9-12 including the tool-catalog print. That is
+# exactly the class of silent session-start failure this deliverable exists
+# to close, so the wiring itself needs direct coverage, not just the
+# upstream fields.
+# ---------------------------------------------------------------------------
+
+
+def _run_session_start_with_workspace_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_path: Path,
+    workspace_result: _wc_mod.WorkspaceConfigResult,
+) -> str:
+    """
+    Run ``main()`` with ``ensure_workspace_configured_detailed`` stubbed to
+    return *workspace_result* directly, isolating step 8's print/.format()
+    wiring from the resolution logic it's driven by (already covered
+    exhaustively in test_workspace_config.py).
+    """
+    monkeypatch.chdir(tmp_path)
+    output = io.StringIO()
+
+    with (
+        patch("pyhooks.session_start._config.load") as mock_load,
+        patch("pyhooks.session_start._db.open_db") as mock_open_db,
+        patch(
+            "pyhooks.session_start._http.post_json",
+            return_value=(200, b'{"session_id":"sess-1-aabb"}'),
+        ),
+        patch("pyhooks.session_start.sys.stdout", output),
+        patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+        patch(
+            "pyhooks.session_start._workspace_config.ensure_workspace_configured_detailed",
+            return_value=workspace_result,
+        ),
+    ):
+        import pyhooks.config as _config_mod
+
+        mock_load.return_value = _config_mod.Config(
+            api_key="test-key-abc123",
+            api_base="http://localhost:19999",
+            state_db_path=db_path,
+        )
+        mock_open_db.side_effect = _real_open_db
+        _ss_mod.main()
+
+    return output.getvalue()
+
+
+class TestWorkspaceStepEmissionWiring:
+    def test_override_applied_prints_workspace_id_and_nothing_else(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        override_uuid = "11111111-1111-1111-1111-111111111111"
+        result = _wc_mod.WorkspaceConfigResult(
+            override_uuid,
+            override_applied=True,
+            override_write_result=_wc_mod.WriteResult.SUCCESS,
+        )
+        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+
+        assert f"Applied X-Workspace-Id override" in text
+        assert override_uuid in text
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+        assert "could not be applied" not in text
+        assert "Removed a stale workspace_id" not in text
+
+    def test_residue_migrated_prints_migrated_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        migrated_uuid = "22222222-2222-2222-2222-222222222222"
+        result = _wc_mod.WorkspaceConfigResult(
+            None,
+            migrated_residue_value=migrated_uuid,
+            baseline_write_result=_wc_mod.WriteResult.SUCCESS,
+        )
+        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+
+        assert "Removed a stale workspace_id" in text
+        assert migrated_uuid in text
+        # Never co-emitted with the override-applied message (mutually
+        # exclusive per WorkspaceConfigResult's own contract).
+        assert "Applied X-Workspace-Id override" not in text
+
+    def test_override_write_skipped_unmanaged_prints_unmanaged_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        result = _wc_mod.WorkspaceConfigResult(
+            None,
+            override_write_result=_wc_mod.WriteResult.SKIPPED_UNMANAGED,
+        )
+        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+
+        assert "could not be applied" in text
+        assert "did not create, so it will not be modified" in text
+        # The distinct FAILED/CONFLICT wording must not also appear.
+        assert "Inspect this project's .mcp.json — it may" not in text
+
+    def test_override_write_failed_prints_failed_warning_with_result_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        result = _wc_mod.WorkspaceConfigResult(
+            None,
+            override_write_result=_wc_mod.WriteResult.FAILED,
+        )
+        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+
+        assert "writing it into .mcp.json failed" in text
+        assert "(result: failed)" in text
+        assert "did not create, so it will not be modified" not in text
+
+    def test_baseline_write_not_success_prints_connection_missing_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        result = _wc_mod.WorkspaceConfigResult(
+            None,
+            baseline_write_result=_wc_mod.WriteResult.SKIPPED_CONFLICT,
+        )
+        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+
+        assert "Could not ensure a Neuroloom MCP connection" in text
+        assert "(result: skipped_conflict)" in text
+
+    def test_baseline_write_success_prints_no_warnings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        result = _wc_mod.WorkspaceConfigResult(
+            None,
+            baseline_write_result=_wc_mod.WriteResult.SUCCESS,
+        )
+        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+        assert "Applied X-Workspace-Id override" not in text
+        assert "Removed a stale workspace_id" not in text
+        assert "could not be applied" not in text
+        # The rest of the hook must still complete — tool catalog is the
+        # last thing printed, proving no exception aborted mid-way.
+        assert "Neuroloom Tool Catalog" in text

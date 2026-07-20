@@ -12,9 +12,16 @@ order:
 6. Prune old trace rows to keep the DB from growing unboundedly.
 7. Flush any buffered observation events that did not drain during the last
    session.
-8. Auto-configure the workspace_id: fetch from API (or read from local cache)
-   and write the X-Workspace-Id header into the project-level .mcp.json so
-   every MCP request routes to the correct workspace automatically.
+8. Ensure workspace routing is configured for this project (D169): read a
+   manual, human-provided per-project override from
+   ``.claude/settings.json`` (migrating away any residue left by a released
+   version's own past auto-write — see ``workspace_config.py``), and write
+   (or ensure) a project-scope ``.mcp.json`` "neuroloom" entry the plugin
+   can prove it owns. A literal ``X-Workspace-Id`` header is written only
+   when a genuine override is configured; otherwise the entry is left
+   headerless, deferring to the live MCP connection's own server-side
+   auto-resolution (ADR-13). Never touches an entry this module didn't
+   create itself.
 9. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``.
 10. Inject the memory-first reminder block into ``CLAUDE.md`` if absent.
 11. Launch a background thread to bootstrap/upgrade ``neuroloom-codeweaver``.
@@ -146,8 +153,16 @@ Restart your Claude Code session after configuring to activate memory.
 # failure, this will not resolve itself on retry, so it gets an explicit,
 # actionable message pointing at the one manual-override mechanism that
 # actually works: the per-project pluginConfigs.workspace_id option (NOT
-# .mcp.json directly — that file is the shared plugin manifest and editing
-# it leaks the override across every project using this plugin).
+# .mcp.json directly — .mcp.json's "neuroloom" entry is written by this
+# module itself, from that same option, once validated; editing .mcp.json
+# by hand bypasses the ownership/residue-migration machinery entirely).
+#
+# D169: this sentinel is confirmed unreachable via this module's
+# Token-authenticated bootstrap call (see workspace_config.py's
+# WORKSPACE_ID_AMBIGUOUS docstring — the bootstrap call resolves via a
+# direct, non-nullable API-key-to-workspace join, structurally incapable of
+# ambiguity). Retained as defensive dead code only; not given a new live
+# trigger by this deliverable.
 _AMBIGUOUS_WORKSPACE_MESSAGE = """\
 [Neuroloom plugin] Workspace could not be auto-configured.
 
@@ -160,6 +175,83 @@ Set it manually in this project's .claude/settings.json:
 Find your workspace IDs at https://app.neuroloom.dev, then restart your \
 Claude Code session to pick up the change.
 """
+
+# D169 (F9) — printed once per session start when a validated, non-residue
+# per-project override drives a successful literal X-Workspace-Id write.
+# Log-only, no confirmation gate (CD decision). Emitted only on
+# WriteResult.SUCCESS — never report an override as "applied" when the
+# header wasn't actually written.
+_OVERRIDE_APPLIED_MESSAGE = (
+    "[Neuroloom plugin] Applied X-Workspace-Id override from this "
+    "project's .claude/settings.json (workspace {workspace_id})."
+)
+
+# D169 (C1) — printed once per session start when a value found at the
+# override key is recognized as this plugin's own prior auto-write (a
+# released-version artifact matching this session's fingerprint-matched
+# cached default), not a human's deliberate choice, and is deleted from
+# .claude/settings.json. Distinct from _OVERRIDE_APPLIED_MESSAGE — the two
+# are never emitted in the same call, since a migrated value is treated as
+# "no override" for the rest of that call.
+_RESIDUE_MIGRATED_MESSAGE = (
+    "[Neuroloom plugin] Removed a stale workspace_id ({workspace_id}) from "
+    "this project's .claude/settings.json — it was this plugin's own prior "
+    "auto-write from an earlier version, not a workspace you configured. "
+    "Set pluginConfigs[\"neuroloom@endless-galaxy-studios\"].options."
+    "workspace_id yourself if you want this project pinned to a specific "
+    "workspace."
+)
+
+# D169 (C6) — Branch C always ensures an owned, headerless baseline
+# .mcp.json "neuroloom" entry exists for every project (the plugin's own
+# shipped .mcp.json is emptied under this branch, so this is the project's
+# *only* Neuroloom connection). If that baseline-ensure step itself doesn't
+# succeed, the project ends up with no Neuroloom connection at all — a
+# silent total failure unless surfaced, so (unlike a debug-only log) this
+# is a user-visible warning naming the WriteResult and pointing at the file
+# to inspect.
+_CONNECTION_MISSING_WARNING = (
+    "[Neuroloom plugin] Could not ensure a Neuroloom MCP connection for "
+    "this project (result: {write_result}). Inspect this project's "
+    ".mcp.json — the \"neuroloom\" entry may be malformed, or an existing "
+    "entry under that name isn't one this plugin created (in which case "
+    "the plugin will not modify it). Memory tools will not be available "
+    "until this is resolved."
+)
+
+# D169 (review fix, following C6) — printed once per session start when a
+# genuine (non-residue) per-project override IS configured in
+# .claude/settings.json, but the literal X-Workspace-Id write into
+# .mcp.json did not succeed. Distinct from _CONNECTION_MISSING_WARNING
+# (which covers the *headerless baseline* ensure step, run only when no
+# override is configured) — this covers the override-header write path,
+# which previously only reached a debug-level logger.warning call
+# (invisible: stderr is suppressed and this hook configures no logging
+# handler). This realistically hits a user who follows the documented
+# override instructions (skills/init/SKILL.md) on a project whose existing
+# .mcp.json entry the plugin doesn't own.
+#
+# SKIPPED_UNMANAGED gets its own message because the remedy differs from
+# FAILED/SKIPPED_CONFLICT: an unmanaged existing entry needs to be removed,
+# renamed, or hand-edited by the user, whereas FAILED/SKIPPED_CONFLICT means
+# the write itself couldn't complete or the file's shape didn't match what
+# this plugin expects.
+_OVERRIDE_WRITE_UNMANAGED_WARNING = (
+    "[Neuroloom plugin] A workspace_id override is configured in this "
+    "project's .claude/settings.json, but it could not be applied: this "
+    "project's .mcp.json already has a \"neuroloom\" entry that this "
+    "plugin did not create, so it will not be modified. Remove or rename "
+    "that entry, or add the X-Workspace-Id header to it by hand, to apply "
+    "the override."
+)
+_OVERRIDE_WRITE_FAILED_WARNING = (
+    "[Neuroloom plugin] A workspace_id override is configured in this "
+    "project's .claude/settings.json, but writing it into .mcp.json failed "
+    "(result: {write_result}). Inspect this project's .mcp.json — it may "
+    "be malformed, or its \"neuroloom\" entry may not match what this "
+    "plugin expects. The override will not take effect until this is "
+    "resolved."
+)
 
 # The CLAUDE.md injection block.
 _CLAUDEMD_BLOCK = """\
@@ -835,27 +927,88 @@ def main() -> None:
         flush_thread.start()
         flush_thread.join(timeout=0.090)
 
-        # Step 8 — workspace auto-configuration.
-        # Fetches the workspace_id for this API key (from cache or API) and
-        # writes it into the project-level .mcp.json as the X-Workspace-Id
-        # header.  Non-fatal — a failure here does not block the session.
-        # Skip when there is no API key (guard already returned above) or
-        # when the MCP server is not the active connection mode.
+        # Step 8 — workspace routing configuration (D169).
+        # Reads a manual, human-provided per-project override from
+        # .claude/settings.json (migrating away any residue left by a
+        # released version's own past auto-write), and ensures a
+        # project-scope .mcp.json "neuroloom" entry this plugin can prove
+        # it owns. A literal X-Workspace-Id header is written only when a
+        # genuine override is configured; otherwise the entry is left
+        # headerless (ADR-13 auto-resolution applies). Non-fatal — a
+        # failure here does not block the session. Skip when there is no
+        # API key only for the bootstrap-fetch sub-step (guard already
+        # returned above for the whole hook) — the override read and both
+        # literal-writer calls run unconditionally (C3).
         #
         # WORKSPACE_ID_AMBIGUOUS is the one outcome that is not transient —
         # a multi-membership caller with no configured workspace_id won't
         # resolve itself on the next session start, so (only) this case
         # gets a user-facing message. Plain None (network/unreachable/
         # unrecognized-error-shape) stays silent, matching prior behavior.
-        workspace_result = _workspace_config.ensure_workspace_configured(
+        workspace_config_result = _workspace_config.ensure_workspace_configured_detailed(
             project_root=cwd,
             db_path=cfg.state_db_path,
             api_base=cfg.api_base,
             api_key=cfg.api_key,
         )
+        workspace_result = workspace_config_result.workspace_id
         if workspace_result == _workspace_config.WORKSPACE_ID_AMBIGUOUS:
             print(_AMBIGUOUS_WORKSPACE_MESSAGE, end="")
             _trace.write(conn, _SCRIPT, "workspace_ambiguous")
+
+        # F9 — override-applied visibility log. Never conflated with the
+        # residue-migration log below: an override that was migrated-away
+        # residue is treated as "no override" and cannot also be "applied"
+        # in the same call.
+        if workspace_config_result.override_applied:
+            print(
+                _OVERRIDE_APPLIED_MESSAGE.format(workspace_id=workspace_config_result.workspace_id),
+                end="\n",
+            )
+            _trace.write(conn, _SCRIPT, "workspace_override_applied")
+
+        # C1 — residue-migration visibility log.
+        if workspace_config_result.migrated_residue_value is not None:
+            print(
+                _RESIDUE_MIGRATED_MESSAGE.format(
+                    workspace_id=workspace_config_result.migrated_residue_value
+                ),
+                end="\n",
+            )
+            _trace.write(conn, _SCRIPT, "workspace_residue_migrated")
+
+        # Review fix (following C6) — override-configured-but-not-applied
+        # warning. Only fires when a genuine override was present (i.e. the
+        # override write path ran) and its literal-header write didn't
+        # succeed. Mutually exclusive with the C6 warning below: exactly
+        # one of override_write_result / baseline_write_result is populated
+        # per call, since only one of the two write branches ever runs.
+        override_write_result = workspace_config_result.override_write_result
+        if (
+            override_write_result is not None
+            and override_write_result != _workspace_config.WriteResult.SUCCESS
+        ):
+            if override_write_result is _workspace_config.WriteResult.SKIPPED_UNMANAGED:
+                print(_OVERRIDE_WRITE_UNMANAGED_WARNING, end="\n")
+            else:
+                print(
+                    _OVERRIDE_WRITE_FAILED_WARNING.format(
+                        write_result=override_write_result.value
+                    ),
+                    end="\n",
+                )
+            _trace.write(conn, _SCRIPT, "workspace_override_write_failed")
+
+        # C6 — Branch C connection-missing warning. Only fires when the
+        # headerless baseline-ensure step ran (i.e. no override applied)
+        # and didn't succeed.
+        baseline_result = workspace_config_result.baseline_write_result
+        if baseline_result is not None and baseline_result != _workspace_config.WriteResult.SUCCESS:
+            print(
+                _CONNECTION_MISSING_WARNING.format(write_result=baseline_result.value),
+                end="\n",
+            )
+            _trace.write(conn, _SCRIPT, "workspace_connection_missing")
 
         # Step 9 — .gitignore management.
         _ensure_gitignore(cwd)

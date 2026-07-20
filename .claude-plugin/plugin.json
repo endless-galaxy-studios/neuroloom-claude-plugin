@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/docs/en/plugins-reference#plugin-manifest-schema",
   "name": "neuroloom",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Claude Code remembers across sessions. Automatic observation capture stores every decision and context shift — searchable in every future session.",
   "author": {
     "name": "Endless Galaxy Studios"
@@ -20,7 +20,7 @@
     },
     "workspace_id": {
       "title": "Workspace ID",
-      "description": "Auto-configured on first session. Routes MCP requests to the correct workspace.",
+      "description": "Optional. Set this to pin this project to a specific workspace (find your workspace IDs at https://app.neuroloom.dev). Never auto-written by the plugin — if unset, this project's MCP connection auto-resolves your workspace server-side.",
       "type": "string",
       "required": false
     }
