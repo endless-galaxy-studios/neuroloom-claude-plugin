@@ -1,8 +1,8 @@
 {
   "$schema": "https://code.claude.com/docs/en/plugins-reference#plugin-manifest-schema",
   "name": "neuroloom",
-  "version": "0.7.3",
-  "description": "Claude Code remembers across sessions. Automatic observation capture stores every decision and context shift — searchable in every future session.",
+  "version": "0.8.0",
+  "description": "Claude Code remembers across sessions. Automatic observation capture stores every decision and context shift, searchable in every future session — scoped to a dedicated per-project key set up with /neuroloom:init. A key configured here globally can be offered as a one-time starting point during setup, but it never captures on a project's behalf by itself.",
   "author": {
     "name": "Endless Galaxy Studios"
   },
@@ -12,16 +12,10 @@
   "keywords": ["claude-code", "persistent-memory", "session-memory", "mcp", "memory", "context", "semantic-search", "coding-agent"],
   "userConfig": {
     "api_key": {
-      "title": "API Key",
-      "description": "Your Neuroloom API key. Get one at https://app.neuroloom.dev/settings/api-key",
+      "title": "API Key (optional seed)",
+      "description": "Optional. A default Neuroloom API key /neuroloom:init can offer to copy into a new project as a starting point — never used directly to route any project's memory capture. Get one at https://app.neuroloom.dev/api-keys",
       "type": "string",
       "sensitive": true,
-      "required": true
-    },
-    "workspace_id": {
-      "title": "Workspace ID",
-      "description": "Optional. Set this to pin this project to a specific workspace (find your workspace IDs at https://app.neuroloom.dev). Never auto-written by the plugin — if unset, this project's MCP connection auto-resolves your workspace server-side.",
-      "type": "string",
       "required": false
     }
   }

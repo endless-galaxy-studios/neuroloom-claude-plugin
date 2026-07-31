@@ -110,13 +110,20 @@ class TestNoApiKey:
     """Without an API key the hook prints setup instructions and exits cleanly."""
 
     def test_no_key_message_printed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # D171 round 8, MAJOR-6 + round 9, M1: explicit env isolation (Step 3's
+        # guard now reads CLAUDE_PLUGIN_OPTION_API_KEY directly to choose
+        # between the dormant/no-key messages) plus chdir/bootstrap-patch,
+        # matching the suite's main()-invoking convention defensively.
         db_path = tmp_path / ".neuroloom.db"
         output = io.StringIO()
+        monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
 
         with (
             patch("pyhooks.session_start._config.load") as mock_load,
             patch("pyhooks.session_start._db.open_db") as mock_open_db,
             patch("pyhooks.session_start.sys.stdout", output),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -124,19 +131,25 @@ class TestNoApiKey:
                 api_key="",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
+                api_key_source="none",
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
 
         text = output.getvalue()
         assert "No API key configured" in text
+        assert "/neuroloom:init" in text
+        assert "/plugins configure" not in text  # not the sole CTA (D171 round 7)
 
     def test_no_key_does_not_call_api(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # D171 round 8, MAJOR-6 + round 9, M1: same env isolation + chdir/
+        # bootstrap-patch as test_no_key_message_printed above.
         db_path = tmp_path / ".neuroloom.db"
         post_calls: list[str] = []
+        monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
 
         def _record_post(
             url: str, headers: dict[str, str], payload: bytes, timeout: float
@@ -149,6 +162,7 @@ class TestNoApiKey:
             patch("pyhooks.session_start._db.open_db") as mock_open_db,
             patch("pyhooks.session_start._http.post_json", side_effect=_record_post),
             patch("pyhooks.session_start.sys.stdout", io.StringIO()),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         ):
             import pyhooks.config as _config_mod
 
@@ -156,7 +170,7 @@ class TestNoApiKey:
                 api_key="",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
+                api_key_source="none",
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
@@ -770,6 +784,169 @@ class TestGitignoreManagement:
         assert count == 1, "Entry should appear exactly once"
 
 
+class TestDormantCapture:
+    """A project with no per-project key but a global seed goes dormant
+    with disclosure, distinct from the no-key-anywhere message."""
+
+    def test_dormant_message_printed_when_seed_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        output = io.StringIO()
+        monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "global-seed-value")
+        monkeypatch.chdir(tmp_path)
+
+        with (
+            patch("pyhooks.session_start._config.load") as mock_load,
+            patch("pyhooks.session_start._db.open_db") as mock_open_db,
+            patch("pyhooks.session_start.sys.stdout", output),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+        ):
+            import pyhooks.config as _config_mod
+
+            mock_load.return_value = _config_mod.Config(
+                api_key="",
+                api_base="http://localhost:19999",
+                state_db_path=db_path,
+                api_key_source="none",
+            )
+            mock_open_db.side_effect = _real_open_db
+            _ss_mod.main()
+
+        text = output.getvalue()
+        assert "Memory capture is off for this project" in text
+        assert "No API key configured" not in text
+
+    def test_no_key_message_printed_when_no_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        output = io.StringIO()
+        monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        with (
+            patch("pyhooks.session_start._config.load") as mock_load,
+            patch("pyhooks.session_start._db.open_db") as mock_open_db,
+            patch("pyhooks.session_start.sys.stdout", output),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None) as mock_bootstrap,
+        ):
+            import pyhooks.config as _config_mod
+
+            mock_load.return_value = _config_mod.Config(
+                api_key="",
+                api_base="http://localhost:19999",
+                state_db_path=db_path,
+                api_key_source="none",
+            )
+            mock_open_db.side_effect = _real_open_db
+            _ss_mod.main()
+
+        text = output.getvalue()
+        assert "No API key configured" in text
+        mock_bootstrap.assert_not_called()  # D171 round 10: pins round-9 CRITICAL-1's revert
+        assert "Memory capture is off for this project" not in text
+
+    def test_dormant_and_no_key_messages_mutually_exclusive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        monkeypatch.chdir(tmp_path)
+        import pyhooks.config as _config_mod
+
+        for seed_present in (True, False):
+            output = io.StringIO()
+            if seed_present:
+                monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "global-seed-value")
+            else:
+                monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+
+            with (
+                patch("pyhooks.session_start._config.load") as mock_load,
+                patch("pyhooks.session_start._db.open_db") as mock_open_db,
+                patch("pyhooks.session_start.sys.stdout", output),
+                patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+            ):
+                mock_load.return_value = _config_mod.Config(
+                    api_key="",
+                    api_base="http://localhost:19999",
+                    state_db_path=db_path,
+                    api_key_source="none",
+                )
+                mock_open_db.side_effect = _real_open_db
+                _ss_mod.main()
+
+            text = output.getvalue()
+            dormant_shown = "Memory capture is off for this project" in text
+            no_key_shown = "No API key configured" in text
+            assert dormant_shown != no_key_shown, "exactly one of the two messages must print"
+
+    def test_gitignore_ordering_survives_two_dormant_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D171 round 8, MAJOR-7 -- an earlier revision's version copied
+        test_no_key_message_printed's Config(..., debug=False) construction,
+        the exact broken fixture pattern causing most of the pre-existing
+        baseline failures, and never actually exercised the try/except wrap
+        it claimed to verify."""
+        db_path = tmp_path / ".neuroloom.db"
+        monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+        import pyhooks.config as _config_mod
+
+        for _ in range(2):
+            output = io.StringIO()
+            with (
+                patch("pyhooks.session_start._config.load") as mock_load,
+                patch("pyhooks.session_start._db.open_db") as mock_open_db,
+                patch("pyhooks.session_start.sys.stdout", output),
+                patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+            ):
+                mock_load.return_value = _config_mod.Config(
+                    api_key="",
+                    api_base="http://localhost:19999",
+                    state_db_path=db_path,
+                    api_key_source="none",
+                )
+                mock_open_db.side_effect = _real_open_db
+                _ss_mod.main()
+            assert "No API key configured" in output.getvalue()
+
+        gi = tmp_path / ".gitignore"
+        assert gi.read_text().count(".neuroloom.db") == 1
+
+    def test_gitignore_failure_does_not_suppress_no_key_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D171 round 8, MAJOR-7 -- item 4's try/except wrap around
+        _ensure_gitignore must prevent a write failure there from
+        suppressing the no-key/dormant disclosure that follows it."""
+        db_path = tmp_path / ".neuroloom.db"
+        output = io.StringIO()
+        monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        with (
+            patch("pyhooks.session_start._config.load") as mock_load,
+            patch("pyhooks.session_start._db.open_db") as mock_open_db,
+            patch("pyhooks.session_start._ensure_gitignore", side_effect=OSError("disk full")),
+            patch("pyhooks.session_start.sys.stdout", output),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+        ):
+            import pyhooks.config as _config_mod
+
+            mock_load.return_value = _config_mod.Config(
+                api_key="",
+                api_base="http://localhost:19999",
+                state_db_path=db_path,
+                api_key_source="none",
+            )
+            mock_open_db.side_effect = _real_open_db
+            _ss_mod.main()
+
+        assert "No API key configured" in output.getvalue()
+
+
 class TestClaudeMdInjection:
     """The memory-first block is appended to ``CLAUDE.md`` exactly once."""
 
@@ -1060,6 +1237,9 @@ def _run_session_start_with_workspace_result(
             api_key="test-key-abc123",
             api_base="http://localhost:19999",
             state_db_path=db_path,
+            api_key_source="project",  # D171 round 9, M1 -- default now that
+            # Config carries api_key_source; a project with a resolved key
+            # (as every test using this helper has) is always "project".
         )
         mock_open_db.side_effect = _real_open_db
         _ss_mod.main()

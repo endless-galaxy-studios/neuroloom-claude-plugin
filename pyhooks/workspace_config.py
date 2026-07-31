@@ -484,6 +484,19 @@ def _fetch_workspace_id_from_api(api_base: str, api_key: str) -> WorkspaceFetchR
         return WorkspaceFetchResult(WorkspaceFetchStatus.UNREACHABLE)
 
 
+def fetch_workspace_id_from_api(api_base: str, api_key: str) -> WorkspaceFetchResult:
+    """
+    Public entry point for callers outside this module (D171 / SKILL.md's
+    Phase 0 Step 2) that need the bootstrap-insight lookup without
+    reaching across a `_`-prefixed boundary. Thin, behavior-preserving
+    delegation — see `_fetch_workspace_id_from_api` for the actual
+    implementation. Never called from this module's own internals; kept
+    as a separate symbol so the existing private function's call sites
+    (and the tests that patch it) are completely unaffected.
+    """
+    return _fetch_workspace_id_from_api(api_base, api_key)
+
+
 def _read_manual_workspace_override(project_root: str) -> str | None:
     """
     Read a human-provided per-project workspace override from this

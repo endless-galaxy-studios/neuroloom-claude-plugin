@@ -14,11 +14,11 @@ discovers all supported files under the workspace root automatically.
 
 Environment variables
 ---------------------
-CLAUDE_PLUGIN_OPTION_API_KEY
-    Neuroloom API key (checked first).
-
-NEUROLOOM_API_KEY
-    Neuroloom API key fallback.
+_NL_KEY
+    The per-project Neuroloom API key, passed in via the child process's
+    environment (never printed) by the invoking script -- see
+    _resolve_config()'s own docstring for why this script does not fall
+    back to any other, more broadly scoped credential tier.
 
 CLAUDE_PLUGIN_OPTION_API_BASE
     Neuroloom API base URL (checked first).
@@ -46,14 +46,20 @@ from pathlib import Path
 def _resolve_config() -> tuple[str, str]:
     """Return (api_key, api_base) from the environment.
 
-    Priority for each:
-    - api_key: CLAUDE_PLUGIN_OPTION_API_KEY → NEUROLOOM_API_KEY
-    - api_base: CLAUDE_PLUGIN_OPTION_API_BASE → NEUROLOOM_API_BASE → default
+    api_key is read exclusively from _NL_KEY -- passed in via the child
+    process's environment (never printed) by the invoking script, which
+    resolves it from .neuroloom.db. This script never falls back to the
+    plugin-global userConfig key or its environment-variable fallback --
+    doing so was D171 round 7's CRITICAL-3: this script, run from the
+    same /neuroloom:init invocation that may have just stored a correct
+    per-project key, would silently POST code-graph structural data
+    using the global key to whichever workspace that key happens to
+    resolve to instead.
+
+    api_base is unaffected -- it is not credential-scoped, so it keeps
+    its existing plugin-option-then-env-var-then-default resolution.
     """
-    api_key = (
-        os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "").strip()
-        or os.environ.get("NEUROLOOM_API_KEY", "").strip()
-    )
+    api_key = os.environ.get("_NL_KEY", "").strip()
     api_base = (
         os.environ.get("CLAUDE_PLUGIN_OPTION_API_BASE", "").strip()
         or os.environ.get("NEUROLOOM_API_BASE", "").strip()

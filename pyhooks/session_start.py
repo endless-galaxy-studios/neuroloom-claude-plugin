@@ -4,9 +4,12 @@ SessionStart hook for neuroloom-claude-plugin.
 Runs once at the beginning of each Claude Code session.  Responsibilities, in
 order:
 
-1. Load configuration from environment.
+1. Load configuration from environment / .neuroloom.db.
 2. Open the SQLite state database.
-3. Guard: if no API key is configured, print setup instructions and exit 0.
+2a. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``
+    (non-fatal; the only step that runs regardless of API-key status).
+3. Guard: if no per-project API key is configured, print dormant/no-key
+   message and exit 0. Steps 4-11 below do not run.
 4. End any stale session left over from a previous invocation.
 5. Start a new session via the Neuroloom REST API.
 6. Prune old trace rows to keep the DB from growing unboundedly.
@@ -21,12 +24,12 @@ order:
    when a genuine override is configured; otherwise the entry is left
    headerless, deferring to the live MCP connection's own server-side
    auto-resolution (ADR-13). Never touches an entry this module didn't
-   create itself.
-9. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``.
-10. Inject the memory-first reminder block into ``CLAUDE.md`` if absent.
-11. Launch a background thread to bootstrap/upgrade ``neuroloom-codeweaver``.
-12. Print the Neuroloom tool catalog to stdout so Claude Code sees it in context.
-13. Close the database in a ``finally`` block.
+   create itself. Does NOT run for a dormant project; see D171/ADR-17
+   Accepted Residual Risk.
+9. Inject the memory-first reminder block into ``CLAUDE.md`` if absent.
+10. Launch a background thread to bootstrap/upgrade ``neuroloom-codeweaver``.
+11. Print the Neuroloom tool catalog to stdout so Claude Code sees it in context.
+12. Close the database in a ``finally`` block.
 
 Design constraints
 ------------------
@@ -131,20 +134,40 @@ _CLAUDEMD_MARKER = "<!-- neuroloom:memory-first -->"
 # redundant pip-install calls when the version has not changed.
 _CODEWEAVER_VERSION_MARKER = ".codeweaver-version"
 
-# The setup-instructions text printed when no API key is configured and the
-# MCP server is not reachable either.
+# Printed once per session start when there is no per-project API key and
+# no global seed key either -- there is nothing this project's memory
+# capture could be routed to.
 _NO_KEY_MESSAGE = """\
-[Neuroloom plugin] No API key configured.
+[Neuroloom plugin] No API key configured for this project.
 
-To activate persistent memory, run:
+Run /neuroloom:init to set one up — it will ask for a key, store it as
+this project's own dedicated credential, and verify it against the API.
 
-  /plugins configure neuroloom
+Don't have a key? Get one at https://app.neuroloom.dev/api-keys
+"""
 
-and enter your Neuroloom API key when prompted.
+# Printed once per session start when there is no per-project API key but a
+# global (seed) key IS configured via Claude Code's plugin userConfig
+# mechanism -- distinguishes "dormant, seed available" from "no key
+# anywhere" (D171 / ADR-17). The global seed is never used to route this
+# project's memory capture -- only a project's own dedicated key does that.
+_DORMANT_CAPTURE_MESSAGE = """\
+[Neuroloom plugin] Memory capture is off for this project.
 
-Don't have a key? Get one at https://app.neuroloom.dev/settings/api-keys
+You have a Neuroloom API key configured globally (via `/plugins configure
+neuroloom`), but it is intentionally NOT used to route this project's
+memory capture — only a project's own dedicated key does that, so a
+credential-scope decision is never made silently.
 
-Restart your Claude Code session after configuring to activate memory.
+One side effect while capture stays off: the automatic check that keeps
+this project's .mcp.json connection entry in sync with .claude/settings.json
+(including applying any workspace override you've configured there) also
+does not run. If you're relying on that override, run /neuroloom:init to
+restore it.
+
+Run /neuroloom:init to set up a key for this project. If you want this
+project to use the same workspace your global key resolves to, /neuroloom:init
+can copy it in for you automatically — say "use default" when asked.
 """
 
 # Printed once per session start when workspace auto-configuration returns
@@ -830,7 +853,7 @@ def _flush_event_buffer(
 
 def _ensure_gitignore(project_root: str) -> None:
     """
-    Step 8 — add ``.neuroloom.db`` to ``.gitignore`` if not already present.
+    Step 2a — add ``.neuroloom.db`` to ``.gitignore`` if not already present.
 
     Idempotent: if the entry already exists (even inside a comment or with
     surrounding whitespace) we leave the file untouched.
@@ -883,9 +906,10 @@ def main() -> None:
     """
     Run the SessionStart hook.
 
-    Follows the 13-step sequence documented in the module docstring.  The
-    database connection is always closed in a ``finally`` block even if an
-    unexpected exception occurs mid-way through.
+    Follows the module docstring's step sequence (Steps 1-12, plus the
+    pre-guard Step 2a).  The database connection is always closed in a
+    ``finally`` block even if an unexpected exception occurs mid-way
+    through.
     """
     # Step 1 — load config.
     cfg = _config.load()
@@ -897,10 +921,27 @@ def main() -> None:
         cwd = str(Path(os.getcwd()).resolve())
         workspace_key = cwd
 
-        # Step 3 — guard: no API key configured.
+        # Step 2a — gitignore management (non-fatal). The only pre-guard
+        # relocation that survives round 9 -- round 8's further relocation of
+        # CLAUDE.md injection, codeweaver bootstrap, and the tool-catalog print
+        # broke the dormant fail-closed / zero-network-I/O guarantee and is
+        # reverted (round 9, CRITICAL-1). See the disposition table in D171's
+        # plan.
+        try:
+            _ensure_gitignore(cwd)
+        except Exception:
+            pass  # non-fatal: D171 round 7 (infosec MAJOR-15) — a write
+                  # failure here must never suppress the dormant-capture
+                  # disclosure or anything that follows it.
+
+        # Step 3 — guard: no per-project API key configured.
         if not cfg.api_key:
-            print(_NO_KEY_MESSAGE, end="")
-            _trace.write(conn, _SCRIPT, "no_api_key")
+            if os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY", "").strip():
+                print(_DORMANT_CAPTURE_MESSAGE, end="")
+                _trace.write(conn, _SCRIPT, "dormant_capture_global_seed_present")
+            else:
+                print(_NO_KEY_MESSAGE, end="")
+                _trace.write(conn, _SCRIPT, "no_api_key")
             return
 
         # Step 4 — end stale session.
@@ -1010,13 +1051,10 @@ def main() -> None:
             )
             _trace.write(conn, _SCRIPT, "workspace_connection_missing")
 
-        # Step 9 — .gitignore management.
-        _ensure_gitignore(cwd)
-
-        # Step 10 — CLAUDE.md injection.
+        # Step 9 — CLAUDE.md injection.
         _inject_claudemd(cwd)
 
-        # Step 11 — bootstrap/upgrade codeweaver (background thread with short join).
+        # Step 10 — bootstrap/upgrade codeweaver (background thread with short join).
         updater = threading.Thread(
             target=_codeweaver_bootstrap_and_upgrade,
             args=(_PLUGIN_ROOT,),
@@ -1035,13 +1073,13 @@ def main() -> None:
         if _codeweaver_install_failed:
             print(_CODEWEAVER_DEGRADED_BANNER)
 
-        # Step 12 — print tool catalog.
+        # Step 11 — print tool catalog.
         print(_TOOL_CATALOG)
 
         _trace.write(conn, _SCRIPT, "started", session_id=session_id)
 
     finally:
-        # Step 13 — close DB.
+        # Step 12 — close DB.
         if conn is not None:
             conn.close()
 

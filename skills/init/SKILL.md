@@ -13,51 +13,142 @@ Before anything else, ensure a Neuroloom API key is configured for this project.
 
 **Step 1: Check if a key already exists.**
 
-Run this Bash command to check whether the plugin already has an API key configured:
+Run this Bash command to check whether this project already has its own dedicated API key configured (not whether any global/plugin-wide key exists):
 
 ```bash
-test -n "${CLAUDE_PLUGIN_OPTION_API_KEY:-}" && echo "KEY_SET" || echo "KEY_MISSING"
+${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import pyhooks.config as _config
+cfg = _config.load()
+print('KEY_SET' if cfg.api_key_source == 'project' else 'KEY_MISSING')
+"
 ```
 
-If the output is `KEY_SET`, skip to Phase 1 — the key is already configured via the plugin system.
+If the output is `KEY_SET`, skip to Phase 1 — the key is already configured *for this project*. If `KEY_MISSING`, proceed to Step 2.
 
 **Step 2: Prompt for the key.**
 
-If the key is missing, ask the user:
+If the key is missing, determine whether a global (seed) key is on file and how it resolves, then present the matching prompt below. Run:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import pyhooks.config as _config
+from pyhooks.workspace_config import fetch_workspace_id_from_api, WorkspaceFetchStatus
+
+seed_key = _config.load_global_seed_key()
+if not seed_key:
+    print('NO_SEED')
+else:
+    result = fetch_workspace_id_from_api('https://api.neuroloom.dev', seed_key)
+    if result.status == WorkspaceFetchStatus.RESOLVED:
+        print(f'RESOLVED:{result.workspace_id}')
+    elif result.status == WorkspaceFetchStatus.AMBIGUOUS:
+        print('AMBIGUOUS')
+    else:
+        print('UNREACHABLE')
+"
+```
+
+This short-circuits to `NO_SEED` with zero network calls whenever no global key is configured; only a non-empty seed proceeds to the bootstrap fetch.
+
+**If the output is `RESOLVED:{workspace_id}`**, present:
 
 ```
-No Neuroloom API key found for this project.
+No per-project key configured for this project yet.
 
-1. Go to https://app.neuroloom.dev/settings/api-key to get your key
-2. Paste it here when ready
+Your Claude Code plugin has a default (global) API key on file, which
+resolves to workspace: {workspace_id}
+(look up the workspace name at https://app.neuroloom.dev)
 
-(If you've already configured it via `/plugins configure neuroloom`, just say "skip")
+- Say "use default" (or similar) if that's the workspace this
+  project's memories should go to — I'll copy that key in as this
+  project's own dedicated key.
+- If this project should go to a DIFFERENT workspace, get a key scoped
+  to that workspace at https://app.neuroloom.dev/api-keys and
+  paste it here.
+- Say "skip" (or similar) to leave this project without a dedicated
+  key for now — memory capture will stay OFF for this project until
+  you run /neuroloom:init again and choose a key.
 ```
 
-Wait for the user's response.
+- `"use default"` (or similar) → proceed to Step 3's use-default storage variant.
+- A pasted key → Step 3's paste-path storage flow; then Step 4.
+- `"skip"` (or similar) → no write, memory capture stays off — proceed to Step 5. State this explicitly in the acknowledgment: *"Skipping — memory capture will stay off for this project until you run /neuroloom:init again. This doesn't remove any workspace connection you already have; setting up a new one, or changing an existing one, will wait until you have a dedicated key. Continuing to check that now."*
 
-- If the user says "skip" or similar → proceed to Phase 1 without storing anything.
-- If the user pastes a key → continue to Step 3.
+**If the output is `NO_SEED`** (arguably the most common first-run state, since `plugin.json`'s `api_key.required` now defaults to `false`), present a two-choice prompt, no default-copy option since there is no seed to offer copying:
+
+```
+No per-project key configured for this project yet, and no default
+(global) key is on file either.
+
+- Get a key at https://app.neuroloom.dev/api-keys and paste it
+  here, or
+- Say "skip" (or similar) to leave this project without a dedicated key
+  for now — memory capture will stay OFF for this project until you run
+  /neuroloom:init again and choose a key.
+```
+
+- A pasted key → Step 3's paste-path storage flow; then Step 4.
+- `"skip"` (or similar) → same skip semantics as the `RESOLVED` skip branch above.
+
+**If the output is `AMBIGUOUS` or `UNREACHABLE`** → present the same reduced paste-or-skip choice as `NO_SEED` above, with the same skip semantics.
 
 **Step 3: Store the key in `.neuroloom.db`.**
 
-Run this Bash command to store the key (replace `{KEY}` with the user's input — do NOT echo the key to stdout):
+Which variant to run depends on how the user responded in Step 2.
+
+**Paste-path** (key passed via the `_NL_KEY` environment variable — do NOT echo the key to stdout):
 
 ```bash
-python3 -c "
-import sqlite3, os
-db = sqlite3.connect('.neuroloom.db')
-db.execute('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-db.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('api_key', os.environ['_NL_KEY']))
-db.commit()
-db.close()
-print('ok')
-" 2>&1
+${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+from pathlib import Path
+from pyhooks.db import open_db
+import os
+
+conn = open_db(Path('.neuroloom.db'))
+if conn is None:
+    print('failed')
+else:
+    conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('api_key', os.environ['_NL_KEY']))
+    conn.commit()
+    conn.close()
+    print('ok')
+"
 ```
 
-Pass the key via an environment variable `_NL_KEY` to avoid it appearing in the command string or shell history.
+**Use-default** (resolves the seed in-process via `load_global_seed_key()` — never through an env var or command-line argument, since it never leaves the process):
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+from pyhooks.config import load_global_seed_key
+from pyhooks.db import open_db
+from pathlib import Path
+
+seed_key = load_global_seed_key()
+if not seed_key:
+    print('failed:no_seed')
+else:
+    conn = open_db(Path('.neuroloom.db'))
+    if conn is None:
+        print('failed')
+    else:
+        conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('api_key', seed_key))
+        conn.commit()
+        conn.close()
+        print('ok')
+"
+```
+
+Neither variant prints the key at any point. `open_db()` already applies the full schema (including the `config` table) idempotently on every call.
+
+**Interpreting the output:**
+
+- `ok` → continue silently. Paste-path → Step 4. Use-default path → skip Step 4 entirely, go directly to Step 5 (a copied seed value was already verified once, when it was originally obtained).
+- `failed` (storage failure — `open_db()` returned `None`, e.g. an unwritable project directory) → print `Could not save your API key locally — check that this project's directory is writable, then try again.` and return to Step 2. Never fall through as if storage succeeded.
+- `failed:no_seed` (use-default variant only) → print `The global key is no longer available — run /neuroloom:init again.` and return to Step 2.
 
 **Step 4: Verify the key works.**
+
+This step runs only on the paste-a-new-key path — skipped entirely on the use-default path (see Step 3).
 
 Run this Bash command to test the key against the API:
 
@@ -65,9 +156,9 @@ Run this Bash command to test the key against the API:
 curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Token {KEY}" https://api.neuroloom.dev/api/v1/workspaces/
 ```
 
-- `200` → Print `API key verified.` and proceed to Phase 1.
+- `200` → Print `API key verified.` and proceed to Step 5.
 - `401` → Print `API key rejected — check that you copied the full key. Try again or say "skip" to continue without it.` Return to Step 2.
-- Any other status or timeout → Print `Could not reach the Neuroloom API. The key has been saved — it will be verified on next session start.` Proceed to Phase 1.
+- Any other status or timeout → Print `Could not reach the Neuroloom API. The key has been saved — it will be verified on next session start.` Proceed to Step 5.
 
 Also remind the user to configure the key in the plugin system for future sessions:
 
@@ -77,46 +168,40 @@ Tip: Run `/plugins configure neuroloom` and paste your key there too — that pe
 
 **Step 5: Configure workspace routing.**
 
-After the API key is verified (or was already present), run the workspace auto-configuration:
+This step is reachable from every exit path in Steps 2-4 — skip/decline exits and both of Step 4's non-401 outcomes included. (Step 1's `KEY_SET` branch skips straight to Phase 1 by design, unaffected by this step.)
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pathlib import Path
+from pyhooks.config import load_project_api_key
 from pyhooks.workspace_config import ensure_workspace_configured, WORKSPACE_ID_AMBIGUOUS
-import os
 
-project_root = os.getcwd()
-db_path = Path(project_root) / '.neuroloom.db'
-api_key = os.environ.get('CLAUDE_PLUGIN_OPTION_API_KEY', '')
+project_root = Path.cwd()
+db_path = project_root / '.neuroloom.db'
+api_key = load_project_api_key(project_root)
 
 if not api_key:
-    import sqlite3
-    try:
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute('SELECT value FROM config WHERE key = ?', ('api_key',)).fetchone()
-        api_key = row[0] if row else ''
-        conn.close()
-    except Exception:
-        api_key = ''
-
-ws = ensure_workspace_configured(
-    project_root=project_root,
-    db_path=db_path,
-    api_base='https://api.neuroloom.dev',
-    api_key=api_key,
-)
-if ws == WORKSPACE_ID_AMBIGUOUS:
-    print('workspace:ambiguous')
-elif ws:
-    print(f'workspace:{ws}')
+    print('workspace:no_project_key')
 else:
-    print('workspace:none')
+    ws = ensure_workspace_configured(
+        project_root=str(project_root),
+        db_path=db_path,
+        api_base='https://api.neuroloom.dev',
+        api_key=api_key,
+    )
+    if ws == WORKSPACE_ID_AMBIGUOUS:
+        print('workspace:ambiguous')
+    elif ws:
+        print(f'workspace:{ws}')
+    else:
+        print('workspace:none')
 "
 ```
 
 - If the output contains `workspace:` followed by a UUID → Print `Workspace configured: [UUID]. All MCP requests will route to this workspace.`
 - If the output is `workspace:ambiguous` → Print `You belong to multiple workspaces — set pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id in .claude/settings.json to pick one, then restart your session.` Continue to Phase 1.
 - If the output is `workspace:none` → Print `Could not determine workspace — it will be configured on next session start.` Continue to Phase 1.
+- If the output is `workspace:no_project_key` → Print `Workspace routing will be configured once this project has its own dedicated key — run /neuroloom:init again after setting one up.` Continue to Phase 1. No call to `ensure_workspace_configured` occurs on this branch.
 
 This step ensures a project-scope `.mcp.json` "neuroloom" entry exists that this plugin can prove it owns. A literal `X-Workspace-Id` header is written into that entry only when you've set `pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id` yourself in this project's `.claude/settings.json` — set that value if you have multiple workspaces and want this project pinned to a specific one, then restart your session to pick up the change. If you don't set an override, the entry is left headerless and the live MCP connection auto-resolves your workspace server-side (silently, if you belong to exactly one workspace; with a clear error telling you to set the override above, if you belong to more than one). Never edit `.mcp.json` directly — the plugin manages that entry itself and will not touch one it didn't create.
 
@@ -393,12 +478,40 @@ Seeding code graph...
 
 **Step 2: Run the seed script.**
 
-Use the Bash tool to invoke:
-```
-timeout 120 ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python ${CLAUDE_PLUGIN_ROOT}/scripts/seed_code_graph.py --workspace-root "{cwd}"
+Use the Bash tool to invoke this wrapper, which resolves this project's dedicated API key and passes it to the seed script via the child process's environment only — never via stdout or the command line:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import os
+import subprocess
+import sys
+from pathlib import Path
+from pyhooks.config import load_project_api_key
+
+project_root = Path('{cwd}')
+api_key = load_project_api_key(project_root)
+
+env = dict(os.environ)
+env['_NL_KEY'] = api_key
+
+try:
+    result = subprocess.run(
+        [
+            '${CLAUDE_PLUGIN_ROOT}/.venv/bin/python',
+            '${CLAUDE_PLUGIN_ROOT}/scripts/seed_code_graph.py',
+            '--workspace-root', str(project_root),
+        ],
+        env=env,
+        timeout=120,
+    )
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired:
+    print('code-graph: failed (timeout)')
+    sys.exit(1)
+"
 ```
 
-Replace `{cwd}` with the actual working directory path. Use `${CLAUDE_PLUGIN_ROOT}` literally — do not use Glob to discover the script path.
+Replace `{cwd}` with the actual working directory path, matching this step's existing `{cwd}` substitution convention. Use `${CLAUDE_PLUGIN_ROOT}` literally — do not use Glob to discover the script path. `api_key` is never printed — it only ever exists as a Python string passed via `env=`. If `.neuroloom.db` has no `api_key` row, `load_project_api_key` returns `""`, and the script correctly prints `code-graph: failed (missing API key)` and exits 1 — handled the same as any other `failed` status below.
 
 Capture the single structured status line printed to stdout.
 
