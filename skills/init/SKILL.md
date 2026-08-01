@@ -170,40 +170,31 @@ Tip: Run `/plugins configure neuroloom` and paste your key there too — that pe
 
 This step is reachable from every exit path in Steps 2-4 — skip/decline exits and both of Step 4's non-401 outcomes included. (Step 1's `KEY_SET` branch skips straight to Phase 1 by design, unaffected by this step.)
 
+If no per-project key resolved (Steps 2-4 ended in "skip" with no key ever stored), print `Workspace routing will be configured once this project has its own dedicated key — run /neuroloom:init again after setting one up.` and continue to Phase 1. Do not attempt any of the checks below without a resolvable key.
+
+Otherwise, check whether this project already has an on-file workspace decision, so this step never silently re-decides one behind the user's back (NFR-DX-3):
+
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pathlib import Path
-from pyhooks.config import load_project_api_key
-from pyhooks.workspace_config import ensure_workspace_configured, WORKSPACE_ID_AMBIGUOUS
+import pyhooks.config as _config
+from pyhooks.workspace_config import read_desired_state, DesiredKind, verify_target_workspace_exists, WorkspaceExistenceStatus
 
-project_root = Path.cwd()
-db_path = project_root / '.neuroloom.db'
-api_key = load_project_api_key(project_root)
-
-if not api_key:
-    print('workspace:no_project_key')
-else:
-    ws = ensure_workspace_configured(
-        project_root=str(project_root),
-        db_path=db_path,
-        api_base='https://api.neuroloom.dev',
-        api_key=api_key,
-    )
-    if ws == WORKSPACE_ID_AMBIGUOUS:
-        print('workspace:ambiguous')
-    elif ws:
-        print(f'workspace:{ws}')
-    else:
-        print('workspace:none')
+cfg = _config.load()
+db_path = Path.cwd() / '.neuroloom.db'
+desired = read_desired_state(db_path)
+print('desired_kind:' + desired.kind.name)
+if desired.kind == DesiredKind.SET_TO_VALUE and desired.value:
+    result = verify_target_workspace_exists(cfg.api_base, cfg.api_key, desired.value)
+    print('desired_name:' + (result.name if result.status == WorkspaceExistenceStatus.FOUND else ''))
+    print('desired_value:' + desired.value)
 "
 ```
 
-- If the output contains `workspace:` followed by a UUID → Print `Workspace configured: [UUID]. All MCP requests will route to this workspace.`
-- If the output is `workspace:ambiguous` → Print `You belong to multiple workspaces — set pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id in .claude/settings.json to pick one, then restart your session.` Continue to Phase 1.
-- If the output is `workspace:none` → Print `Could not determine workspace — it will be configured on next session start.` Continue to Phase 1.
-- If the output is `workspace:no_project_key` → Print `Workspace routing will be configured once this project has its own dedicated key — run /neuroloom:init again after setting one up.` Continue to Phase 1. No call to `ensure_workspace_configured` occurs on this branch.
+- `desired_kind` is `SET_TO_VALUE` or `EXPLICITLY_CLEARED` → a decision already exists for this project. Present (verbatim, MINOR m — substitute `[workspace name | no override]` with the resolved name (or the bare uuid if the lookup didn't return `FOUND`) for `SET_TO_VALUE`, or the literal text "no override" for `EXPLICITLY_CLEARED`): *"This project already has a workspace decision on file (desired: [workspace name | no override]). Run /neuroloom:workspace if you want to change it — this won't re-decide it for you."* Continue to Phase 1 — do not proceed into the shared flow below.
+- `desired_kind` is `UNSET` → no decision has ever been made for this project. Invoke the identical underlying flow `/neuroloom:workspace` uses, starting from that command's **Phase 1 (Inventory & Settings Migration)** onward (this project's key has already been established by Steps 1-4 above, so `/neuroloom:workspace`'s own Phase 0 key-establishment step is not needed here — skip straight to its Phase 1). Follow that skill's inventory read, S9 migration disclosure (if applicable), state presentation, and main menu exactly as written there — do not reimplement any of that logic separately in this file (FR-11/NFR-Arch-2: one shared flow, two entry points). After that flow's main-menu choice completes (including "leave everything as-is"), continue to Phase 1 below.
 
-This step ensures a project-scope `.mcp.json` "neuroloom" entry exists that this plugin can prove it owns. A literal `X-Workspace-Id` header is written into that entry only when you've set `pluginConfigs["neuroloom@endless-galaxy-studios"].options.workspace_id` yourself in this project's `.claude/settings.json` — set that value if you have multiple workspaces and want this project pinned to a specific one, then restart your session to pick up the change. If you don't set an override, the entry is left headerless and the live MCP connection auto-resolves your workspace server-side (silently, if you belong to exactly one workspace; with a clear error telling you to set the override above, if you belong to more than one). Never edit `.mcp.json` directly — the plugin manages that entry itself and will not touch one it didn't create.
+This step ensures a project-scope `.mcp.json` "neuroloom" entry exists that this plugin can prove it owns, and that its desired-workspace routing (if the user chooses to set one via the shared flow above) is recorded in `.neuroloom.db`, not `.claude/settings.json` — that file is no longer a live routing input (FR-8). If no override is set, the entry is left headerless and the live MCP connection auto-resolves your workspace server-side (silently, if you belong to exactly one workspace; with a clear error telling you to set an override, if you belong to more than one). Never edit `.mcp.json` directly — the plugin manages that entry itself and will not touch one it didn't create without your explicit consent (see `/neuroloom:workspace`'s adoption flow).
 
 **One-time re-authentication note:** this mechanism (D169) replaced the plugin's own shipped `.mcp.json` connection with a project-scope one for every project. If this project was previously using the plugin's shipped connection, your first session after upgrading will likely need you to complete OAuth again for the new project-scope connection.
 

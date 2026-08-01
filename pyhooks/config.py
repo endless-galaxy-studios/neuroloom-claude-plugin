@@ -36,10 +36,12 @@ workspace_id
 ------------
 The ``workspace_id`` field is loaded exclusively from the ``config`` table in
 ``.neuroloom.db``.  It is written there by
-``pyhooks.workspace_config.ensure_workspace_configured`` after the first
-successful session start.  There is no environment variable override for
-workspace_id — the value is always fetched from the Neuroloom API and cached
-locally so it stays in sync with the API key's actual workspace assignment.
+``pyhooks.workspace_config.check_resolvability_with_cache`` (the F14
+fingerprint-cache fast path used by the automatic session-start axis) after
+a successful resolvability check.  There is no environment variable override
+for workspace_id — the value is always fetched from the Neuroloom API and
+cached locally so it stays in sync with the API key's actual workspace
+assignment.
 """
 
 import logging
@@ -81,9 +83,9 @@ def _load_workspace_id_from_state_db(cwd: str) -> str:
     Load workspace_id from .neuroloom.db config table.
 
     Returns an empty string if the file does not exist, the entry is missing,
-    or reading fails.  The workspace_id is populated asynchronously by
-    ``pyhooks.workspace_config.ensure_workspace_configured`` after the first
-    successful session start.
+    or reading fails.  The workspace_id is populated by
+    ``pyhooks.workspace_config.check_resolvability_with_cache`` after a
+    successful resolvability check.
     """
     db_path = os.path.join(cwd, ".neuroloom.db")
     if not os.path.exists(db_path):

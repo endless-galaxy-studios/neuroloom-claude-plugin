@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-08-01
+
+### Added
+
+- New `/neuroloom:workspace` command — the sole human-driven entry point for setting, changing, clearing, or adopting a project's desired workspace. `/neuroloom:init` invokes it as well, rather than duplicating its logic. The adoption path (bringing a hand-edited `.mcp.json` entry the plugin doesn't already own under plugin management) is TOCTOU-guarded — the entry's state is re-read and re-compared immediately before the write, not trusted from an earlier read — and a decline is sticky per exact entry state: the offer is suppressed until the entry's content actually changes, via a stored content hash, not re-asked every session.
+
+### Changed
+
+- `.neuroloom.db`'s existing `config` key/value table now holds a **mutable desired-state** record (desired workspace, a three-valued "is desired state set" sentinel, a settings.json-migration-done marker, and the unowned-entry decline hash) instead of the prior confirm-once override. A single reconciliation routine diffs this desired state against `.mcp.json`'s observed state and converges every entry the plugin owns — including creating the baseline entry from scratch, header included, when a workspace is already desired at creation time. This replaces the ADR-15 confirm-once override model entirely; see ADR-18 (supersedes ADR-15 in full).
+- Every write path — including the automatic session-start axis, not just human-driven commands — is now gated on a **resolved** per-project API key (a live-checked, working key), not merely a *present* one. A stored-but-invalid key correctly blocks writes rather than silently no-oping.
+- `.claude/settings.json` is retired as a routing input. A one-time, resolvability-gated migration reads any legacy override value out of it and moves it into `.neuroloom.db`'s desired-state record; after that, `.claude/settings.json` is never read again by anything in this plugin.
+- `.claude-plugin/plugin.json`'s version bumped to `0.9.0`.
+
+### Removed
+
+- The old `ensure_workspace_configured` / `ensure_workspace_configured_detailed` entry points, and the automatic residue-vs-override equality guessing they drove, are retired outright — not wrapped or deprecated. The now-orphaned `WORKSPACE_ID_AMBIGUOUS` sentinel (its only producer lived inside the deleted function) is removed along with every consumer and message that referenced it.
+
 ## [0.8.0] - 2026-07-30
 
 ### Changed

@@ -1187,32 +1187,46 @@ def test_no_banner_on_happy_path(
 
 
 # ---------------------------------------------------------------------------
-# D169 step-8 emission wiring — session_start.py's own print/.format() calls
-# for each WorkspaceConfigResult shape. test_workspace_config.py already
-# covers the *fields* (override_applied, migrated_residue_value,
-# baseline_write_result, override_write_result) that drive these prints; this
-# class covers the print/.format() wiring itself, which was previously
-# exercised only by inspection. A future rename of a message constant's
-# placeholder, or a `.value` access on the wrong type, would raise inside
-# main()'s un-guarded try block (only `finally` closes the DB — nothing
-# catches), aborting steps 9-12 including the tool-catalog print. That is
-# exactly the class of silent session-start failure this deliverable exists
-# to close, so the wiring itself needs direct coverage, not just the
+# D172 Phase 5 — Step 8 emission wiring — session_start.py's own
+# print/.format() calls, rewritten against the new gated_reconcile /
+# ReconcileOutcome API (WorkspaceConfigResult is retired). Same six
+# scenarios as the D169-era class this replaces, remapped onto the six
+# decision/write_result shapes Step 8 actually branches on today:
+#   WARN_ONLY                                -> unowned-conflict warning
+#   STAMP_OWNERSHIP_ONLY                     -> unowned-conflict warning
+#   STAMP_OWNERSHIP_WRITE_HEADER             -> unowned-conflict warning
+#   CREATE_BASELINE/CREATE_WITH_HEADER, fail -> connection-missing warning
+#   CREATE_BASELINE/CREATE_WITH_HEADER, ok   -> silent (baseline ensured)
+#   WRITE_HEADER/CLEAR_HEADER, fail          -> update-write-failed warning
+#   WRITE_HEADER/CLEAR_HEADER, ok            -> silent (already applied)
+#   NO_OP                                    -> silent (already converged)
+# test_workspace_config.py already covers the *fields* (decision,
+# write_result, error) that drive these prints; this class covers the
+# print/.format() wiring itself, which is otherwise exercised only by
+# inspection. A future rename of a message constant's placeholder, or a
+# `.value` access on the wrong type, would raise inside main()'s
+# un-guarded try block (only `finally` closes the DB — nothing catches),
+# aborting steps 9-12 including the tool-catalog print. That is exactly
+# the class of silent session-start failure this deliverable exists to
+# close, so the wiring itself needs direct coverage, not just the
 # upstream fields.
 # ---------------------------------------------------------------------------
 
 
-def _run_session_start_with_workspace_result(
+def _run_session_start_with_reconcile_outcome(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     db_path: Path,
-    workspace_result: _wc_mod.WorkspaceConfigResult,
+    gated_outcome: _wc_mod.GatedReconcileOutcome,
 ) -> str:
     """
-    Run ``main()`` with ``ensure_workspace_configured_detailed`` stubbed to
-    return *workspace_result* directly, isolating step 8's print/.format()
-    wiring from the resolution logic it's driven by (already covered
-    exhaustively in test_workspace_config.py).
+    Run ``main()`` with ``gated_reconcile`` stubbed to return
+    *gated_outcome* directly, isolating Step 8's print/.format() wiring
+    from the resolution logic it's driven by (already covered exhaustively
+    in test_workspace_config.py). Patching ``gated_reconcile`` (rather than
+    letting Step 8 drive a real filesystem/network round-trip) is the D172
+    equivalent of the retired helper's ``ensure_workspace_configured_
+    detailed`` patch — same isolation shape, new target function.
     """
     monkeypatch.chdir(tmp_path)
     output = io.StringIO()
@@ -1227,8 +1241,8 @@ def _run_session_start_with_workspace_result(
         patch("pyhooks.session_start.sys.stdout", output),
         patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
         patch(
-            "pyhooks.session_start._workspace_config.ensure_workspace_configured_detailed",
-            return_value=workspace_result,
+            "pyhooks.session_start._workspace_config.gated_reconcile",
+            return_value=gated_outcome,
         ),
     ):
         import pyhooks.config as _config_mod
@@ -1248,98 +1262,222 @@ def _run_session_start_with_workspace_result(
 
 
 class TestWorkspaceStepEmissionWiring:
-    def test_override_applied_prints_workspace_id_and_nothing_else(
+    """MIGRATE (D172 Phase 5) — rewritten against gated_reconcile/ReconcileOutcome."""
+
+    def test_warn_only_prints_unowned_conflict_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         db_path = tmp_path / ".neuroloom.db"
-        override_uuid = "11111111-1111-1111-1111-111111111111"
-        result = _wc_mod.WorkspaceConfigResult(
-            override_uuid,
-            override_applied=True,
-            override_write_result=_wc_mod.WriteResult.SUCCESS,
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(_wc_mod.Decision.WARN_ONLY, None),
         )
-        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
+        )
 
-        assert f"Applied X-Workspace-Id override" in text
-        assert override_uuid in text
+        assert "isn't one this plugin manages" in text
         assert "Could not ensure a Neuroloom MCP connection" not in text
-        assert "could not be applied" not in text
-        assert "Removed a stale workspace_id" not in text
+        assert "Could not update this project's .mcp.json" not in text
 
-    def test_residue_migrated_prints_migrated_value(
+    def test_stamp_ownership_only_prints_unowned_conflict_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Round-2 review finding (D172 completion review, MINOR): this class
+        pins Step 8's decision->print-branch wiring, but had no case for
+        Decision.STAMP_OWNERSHIP_ONLY at all — only its sibling
+        STAMP_OWNERSHIP_WRITE_HEADER was covered end-to-end (in
+        test_workspace_config.py's TestDeclineHashWarningIndependence).
+        reconcile() never executes either STAMP_OWNERSHIP_* decision (FR-7
+        -- adoption requires explicit human consent); both refuse the
+        write and surface an `error`, which session_start.py's Step 8
+        folds into the same _UNOWNED_CONFLICT_WARNING branch as WARN_ONLY.
+        """
+        db_path = tmp_path / ".neuroloom.db"
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.STAMP_OWNERSHIP_ONLY,
+                None,
+                error=(
+                    "reconcile() reached an adoption decision "
+                    "(STAMP_OWNERSHIP_ONLY) — refusing to execute without "
+                    "explicit human consent; run /neuroloom:workspace to "
+                    "review and adopt this entry"
+                ),
+            ),
+        )
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
+        )
+
+        assert "isn't one this plugin manages" in text
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+        assert "Could not update this project's .mcp.json" not in text
+
+    def test_create_baseline_failure_prints_connection_missing_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         db_path = tmp_path / ".neuroloom.db"
-        migrated_uuid = "22222222-2222-2222-2222-222222222222"
-        result = _wc_mod.WorkspaceConfigResult(
-            None,
-            migrated_residue_value=migrated_uuid,
-            baseline_write_result=_wc_mod.WriteResult.SUCCESS,
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.CREATE_BASELINE, _wc_mod.WriteResult.SKIPPED_CONFLICT
+            ),
         )
-        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
-
-        assert "Removed a stale workspace_id" in text
-        assert migrated_uuid in text
-        # Never co-emitted with the override-applied message (mutually
-        # exclusive per WorkspaceConfigResult's own contract).
-        assert "Applied X-Workspace-Id override" not in text
-
-    def test_override_write_skipped_unmanaged_prints_unmanaged_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db_path = tmp_path / ".neuroloom.db"
-        result = _wc_mod.WorkspaceConfigResult(
-            None,
-            override_write_result=_wc_mod.WriteResult.SKIPPED_UNMANAGED,
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
         )
-        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
-
-        assert "could not be applied" in text
-        assert "did not create, so it will not be modified" in text
-        # The distinct FAILED/CONFLICT wording must not also appear.
-        assert "Inspect this project's .mcp.json — it may" not in text
-
-    def test_override_write_failed_prints_failed_warning_with_result_value(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db_path = tmp_path / ".neuroloom.db"
-        result = _wc_mod.WorkspaceConfigResult(
-            None,
-            override_write_result=_wc_mod.WriteResult.FAILED,
-        )
-        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
-
-        assert "writing it into .mcp.json failed" in text
-        assert "(result: failed)" in text
-        assert "did not create, so it will not be modified" not in text
-
-    def test_baseline_write_not_success_prints_connection_missing_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db_path = tmp_path / ".neuroloom.db"
-        result = _wc_mod.WorkspaceConfigResult(
-            None,
-            baseline_write_result=_wc_mod.WriteResult.SKIPPED_CONFLICT,
-        )
-        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
 
         assert "Could not ensure a Neuroloom MCP connection" in text
         assert "(result: skipped_conflict)" in text
+        assert "isn't one this plugin manages" not in text
 
-    def test_baseline_write_success_prints_no_warnings(
+    def test_create_with_header_success_prints_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         db_path = tmp_path / ".neuroloom.db"
-        result = _wc_mod.WorkspaceConfigResult(
-            None,
-            baseline_write_result=_wc_mod.WriteResult.SUCCESS,
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.CREATE_WITH_HEADER, _wc_mod.WriteResult.SUCCESS
+            ),
         )
-        text = _run_session_start_with_workspace_result(monkeypatch, tmp_path, db_path, result)
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
+        )
 
         assert "Could not ensure a Neuroloom MCP connection" not in text
-        assert "Applied X-Workspace-Id override" not in text
-        assert "Removed a stale workspace_id" not in text
-        assert "could not be applied" not in text
+        assert "Could not update this project's .mcp.json" not in text
+        assert "isn't one this plugin manages" not in text
+        # The rest of the hook must still complete.
+        assert "Neuroloom Tool Catalog" in text
+
+    def test_write_header_failure_prints_update_write_failed_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.WRITE_HEADER, _wc_mod.WriteResult.FAILED
+            ),
+        )
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
+        )
+
+        assert "Could not update this project's .mcp.json" in text
+        assert "(result: failed)" in text
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+
+    def test_clear_header_success_prints_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.CLEAR_HEADER, _wc_mod.WriteResult.SUCCESS
+            ),
+        )
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
+        )
+
+        assert "Could not update this project's .mcp.json" not in text
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+        assert "isn't one this plugin manages" not in text
+
+    def test_no_op_prints_no_warnings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = tmp_path / ".neuroloom.db"
+        gated_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(_wc_mod.Decision.NO_OP, None),
+        )
+        text = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, db_path, gated_outcome
+        )
+
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+        assert "Could not update this project's .mcp.json" not in text
+        assert "isn't one this plugin manages" not in text
         # The rest of the hook must still complete — tool catalog is the
         # last thing printed, proving no exception aborted mid-way.
+        assert "Neuroloom Tool Catalog" in text
+
+
+# ---------------------------------------------------------------------------
+# D172 Phase 5 — M-12: automatic-axis resolvability-gate negative test.
+# Parity with the sibling security tests in test_workspace_config.py
+# (TestResolvabilityGateRefusesWrites) — this one proves the gate is
+# actually wired into Step 8's real call, not merely that gated_reconcile
+# itself refuses in isolation.
+# ---------------------------------------------------------------------------
+
+
+class TestAutomaticAxisResolvabilityGateNegative:
+    def test_unreachable_key_never_writes_mcp_json_from_main(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A desired workspace is on file (set via a prior /neuroloom:workspace
+        run), but the configured API key doesn't resolve right now (dead
+        API base -- the same "present but unreachable" hazard an invalid
+        key or a network blip produces). Step 8 must reach zero filesystem
+        writes: gated_reconcile's resolvability gate refuses before
+        reconcile() is ever called, exactly as
+        TestResolvabilityGateRefusesWrites proves one layer down -- this
+        test proves that refusal is actually reached from main() itself,
+        not merely from a direct gated_reconcile() call in isolation.
+        """
+        import pyhooks.workspace_config as _wc_prod
+
+        db_path = tmp_path / ".neuroloom.db"
+        monkeypatch.chdir(tmp_path)
+        output = io.StringIO()
+
+        with (
+            patch("pyhooks.session_start._config.load") as mock_load,
+            patch("pyhooks.session_start._db.open_db") as mock_open_db,
+            patch(
+                "pyhooks.session_start._http.post_json",
+                return_value=(200, b'{"session_id":"sess-1-aabb"}'),
+            ),
+            patch("pyhooks.session_start.sys.stdout", output),
+            patch("pyhooks.session_start._codeweaver_bootstrap_and_upgrade", return_value=None),
+        ):
+            import pyhooks.config as _config_mod
+
+            mock_load.return_value = _config_mod.Config(
+                api_key="unreachable-key",
+                # A dead port -- nothing listening, so the bootstrap fetch
+                # inside check_resolvability_with_cache genuinely fails.
+                api_base="http://127.0.0.1:1",
+                state_db_path=db_path,
+                api_key_source="project",
+            )
+            mock_open_db.side_effect = _real_open_db
+            conn = _real_open_db(db_path)
+            assert conn is not None
+            _wc_prod.write_desired_state(
+                db_path,
+                _wc_prod.DesiredState(
+                    _wc_prod.DesiredKind.SET_TO_VALUE,
+                    "90000000-0000-0000-0000-000000000001",
+                ),
+            )
+            conn.close()
+
+            _ss_mod.main()
+
+        text = output.getvalue()
+        assert "Could not ensure a Neuroloom MCP connection" not in text
+        assert "Could not update this project's .mcp.json" not in text
+        assert "isn't one this plugin manages" not in text
+        assert not (tmp_path / ".mcp.json").exists()
+        # The rest of the hook must still complete.
         assert "Neuroloom Tool Catalog" in text
