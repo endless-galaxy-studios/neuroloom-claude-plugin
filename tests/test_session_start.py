@@ -1193,7 +1193,7 @@ def test_no_banner_on_happy_path(
 # scenarios as the D169-era class this replaces, remapped onto the six
 # decision/write_result shapes Step 8 actually branches on today:
 #   WARN_ONLY                                -> unowned-conflict warning
-#   STAMP_OWNERSHIP_ONLY                     -> unowned-conflict warning
+#   STAMP_OWNERSHIP_ONLY                     -> stamp-ownership-only message (D176 #4)
 #   STAMP_OWNERSHIP_WRITE_HEADER             -> unowned-conflict warning
 #   CREATE_BASELINE/CREATE_WITH_HEADER, fail -> connection-missing warning
 #   CREATE_BASELINE/CREATE_WITH_HEADER, ok   -> silent (baseline ensured)
@@ -1280,19 +1280,24 @@ class TestWorkspaceStepEmissionWiring:
         assert "Could not ensure a Neuroloom MCP connection" not in text
         assert "Could not update this project's .mcp.json" not in text
 
-    def test_stamp_ownership_only_prints_unowned_conflict_warning(
+    def test_stamp_ownership_only_prints_distinct_no_conflict_message(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        Round-2 review finding (D172 completion review, MINOR): this class
-        pins Step 8's decision->print-branch wiring, but had no case for
-        Decision.STAMP_OWNERSHIP_ONLY at all — only its sibling
-        STAMP_OWNERSHIP_WRITE_HEADER was covered end-to-end (in
-        test_workspace_config.py's TestDeclineHashWarningIndependence).
-        reconcile() never executes either STAMP_OWNERSHIP_* decision (FR-7
-        -- adoption requires explicit human consent); both refuse the
-        write and surface an `error`, which session_start.py's Step 8
-        folds into the same _UNOWNED_CONFLICT_WARNING branch as WARN_ONLY.
+        D176 #4 (this plan): Decision.STAMP_OWNERSHIP_ONLY previously shared
+        _UNOWNED_CONFLICT_WARNING with WARN_ONLY/STAMP_OWNERSHIP_WRITE_HEADER
+        — wording that falsely implied a conflict exists. STAMP_OWNERSHIP_ONLY
+        means the unowned entry's header already equals the desired
+        workspace value (decide_reconciliation, workspace_config.py ~876-880)
+        — routing is already correct, so the hook must print the distinct
+        _STAMP_OWNERSHIP_ONLY_MESSAGE instead. decide_reconciliation's
+        decision logic itself is unchanged by this fix — only the hook's
+        print branch changed (verified by test_workspace_config.py, which
+        this file does not duplicate).
+
+        Round-2 review finding (D172 completion review, MINOR) originally
+        added this class's STAMP_OWNERSHIP_ONLY case, asserting the old
+        (wrong) shared-warning behavior; D176 #4 corrects it.
         """
         db_path = tmp_path / ".neuroloom.db"
         gated_outcome = _wc_mod.GatedReconcileOutcome(
@@ -1312,9 +1317,95 @@ class TestWorkspaceStepEmissionWiring:
             monkeypatch, tmp_path, db_path, gated_outcome
         )
 
-        assert "isn't one this plugin manages" in text
+        assert "Workspace routing is already correct for this project" in text
+        assert "no conflict to resolve" in text
+        assert "isn't one this plugin manages" not in text
         assert "Could not ensure a Neuroloom MCP connection" not in text
         assert "Could not update this project's .mcp.json" not in text
+
+
+class TestStampOwnershipOnlyDistinctFromSiblings:
+    """
+    D176 #4 acceptance criterion: WARN_ONLY, STAMP_OWNERSHIP_ONLY, and
+    STAMP_OWNERSHIP_WRITE_HEADER must each produce non-empty output, and
+    STAMP_OWNERSHIP_ONLY's output must be distinct from its two siblings'.
+
+    Deviation from a literal "all three pairwise distinct" reading of the
+    dispatch: per this plan's own Outcome/Guidance for #4 (lines 160, 192),
+    WARN_ONLY and STAMP_OWNERSHIP_WRITE_HEADER are *designed* to keep
+    sharing the exact same `_UNOWNED_CONFLICT_WARNING` text — only
+    STAMP_OWNERSHIP_ONLY gets a new, distinct message. Asserting all three
+    pairwise-distinct would fail against the correct implementation. This
+    test instead pins the real invariant the plan's purpose clause (line
+    194) describes: STAMP_OWNERSHIP_ONLY's message must never collapse back
+    to empty or onto the shared warning, and the shared-warning pair must
+    keep matching each other (so a future accidental split of that pair is
+    also caught).
+    """
+
+    def test_stamp_ownership_only_distinct_others_share_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outputs: dict[_wc_mod.Decision, str] = {}
+
+        warn_only_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(_wc_mod.Decision.WARN_ONLY, None),
+        )
+        outputs[_wc_mod.Decision.WARN_ONLY] = _run_session_start_with_reconcile_outcome(
+            monkeypatch, tmp_path, tmp_path / "warn_only.db", warn_only_outcome
+        )
+
+        stamp_only_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.STAMP_OWNERSHIP_ONLY,
+                None,
+                error="reconcile() reached an adoption decision (STAMP_OWNERSHIP_ONLY)",
+            ),
+        )
+        outputs[_wc_mod.Decision.STAMP_OWNERSHIP_ONLY] = (
+            _run_session_start_with_reconcile_outcome(
+                monkeypatch, tmp_path, tmp_path / "stamp_only.db", stamp_only_outcome
+            )
+        )
+
+        stamp_write_header_outcome = _wc_mod.GatedReconcileOutcome(
+            resolvability=_wc_mod.Resolvability.RESOLVED,
+            reconcile=_wc_mod.ReconcileOutcome(
+                _wc_mod.Decision.STAMP_OWNERSHIP_WRITE_HEADER,
+                None,
+                error=(
+                    "reconcile() reached an adoption decision "
+                    "(STAMP_OWNERSHIP_WRITE_HEADER)"
+                ),
+            ),
+        )
+        outputs[_wc_mod.Decision.STAMP_OWNERSHIP_WRITE_HEADER] = (
+            _run_session_start_with_reconcile_outcome(
+                monkeypatch,
+                tmp_path,
+                tmp_path / "stamp_write_header.db",
+                stamp_write_header_outcome,
+            )
+        )
+
+        for decision, text in outputs.items():
+            assert text.strip() != "", f"{decision} produced empty output"
+
+        warn_only_text = outputs[_wc_mod.Decision.WARN_ONLY]
+        stamp_only_text = outputs[_wc_mod.Decision.STAMP_OWNERSHIP_ONLY]
+        stamp_write_header_text = outputs[_wc_mod.Decision.STAMP_OWNERSHIP_WRITE_HEADER]
+
+        # By design (plan lines 160, 192): WARN_ONLY and
+        # STAMP_OWNERSHIP_WRITE_HEADER intentionally share the same
+        # _UNOWNED_CONFLICT_WARNING text.
+        assert warn_only_text == stamp_write_header_text
+
+        # STAMP_OWNERSHIP_ONLY must be distinct from both — this is the
+        # regression this fix and this test exist to guard.
+        assert stamp_only_text != warn_only_text
+        assert stamp_only_text != stamp_write_header_text
 
     def test_create_baseline_failure_prints_connection_missing_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

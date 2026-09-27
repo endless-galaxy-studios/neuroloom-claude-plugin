@@ -196,18 +196,37 @@ _CONNECTION_MISSING_WARNING = (
 )
 
 # D172 (M-14 item 5, FR-9): printed once per session start when
-# decide_reconciliation answers WARN_ONLY, STAMP_OWNERSHIP_ONLY, or
-# STAMP_OWNERSHIP_WRITE_HEADER — a workspace is desired for this project
-# but the current .mcp.json "neuroloom" entry is unowned (headerless or
-# headered), so there is no header value to sensibly overwrite without a
-# human's explicit consent (FR-7: automatic paths never touch an entry they
-# don't own). Points at /neuroloom:workspace, the only place that consent
-# can be given.
+# decide_reconciliation answers WARN_ONLY or STAMP_OWNERSHIP_WRITE_HEADER —
+# a workspace is desired for this project but the current .mcp.json
+# "neuroloom" entry is unowned (headerless, or headered with a value that
+# differs from the desired workspace), so there is a genuine conflict: no
+# header value can be sensibly overwritten without a human's explicit
+# consent (FR-7: automatic paths never touch an entry they don't own).
+# Points at /neuroloom:workspace, the only place that consent can be given.
+#
+# D176 #4 (this plan) split STAMP_OWNERSHIP_ONLY out of this branch — see
+# _STAMP_OWNERSHIP_ONLY_MESSAGE below. That decision means the unowned
+# entry's header already equals the desired workspace value; there is no
+# conflict to warn about, only an unrecorded adoption a human may want to
+# make formal.
 _UNOWNED_CONFLICT_WARNING = (
     "[Neuroloom plugin] This project's .mcp.json connection isn't one "
     "this plugin manages, and a workspace has been set for this project "
     "— it won't be applied automatically. Run /neuroloom:workspace to "
     "review it and, if you choose, adopt it."
+)
+
+# D176 #4: printed once per session start when decide_reconciliation answers
+# STAMP_OWNERSHIP_ONLY — the unowned .mcp.json "neuroloom" entry's header
+# already equals the desired workspace value, so routing is already correct
+# and there is nothing to reconcile. Distinct from _UNOWNED_CONFLICT_WARNING
+# (WARN_ONLY / STAMP_OWNERSHIP_WRITE_HEADER) because there is no conflict
+# here — the only thing a human might still want is to formally record this
+# project as adopted by the plugin, which /neuroloom:workspace also handles.
+_STAMP_OWNERSHIP_ONLY_MESSAGE = (
+    "[Neuroloom plugin] Workspace routing is already correct for this "
+    "project — no conflict to resolve. Run /neuroloom:workspace only if "
+    "you want to formally record this project as adopted."
 )
 
 # D172 (M-14 item 6, replaces the old _OVERRIDE_WRITE_FAILED_WARNING):
@@ -945,12 +964,17 @@ def main() -> None:
         # comes from `read_desired_state`, entirely independent of the
         # adoption-consent flow, so any project with a desired workspace
         # set and a hand-edited, headered-but-unowned ".mcp.json" entry
-        # (e.g. a human hand-edited the header to point somewhere else)
-        # reaches STAMP_OWNERSHIP_ONLY/STAMP_OWNERSHIP_WRITE_HEADER here
-        # every session. Both are "unowned entry, desired workspace set,
-        # refuse-to-touch-without-consent" outcomes — the same user-visible
-        # shape as WARN_ONLY below — so they surface the same
-        # _UNOWNED_CONFLICT_WARNING, not just a trace.
+        # (e.g. a human hand-edited the header to point somewhere else, or
+        # to the same value the plugin would have chosen) reaches
+        # STAMP_OWNERSHIP_ONLY/STAMP_OWNERSHIP_WRITE_HEADER here every
+        # session. They are not the same user-visible shape, though:
+        # STAMP_OWNERSHIP_WRITE_HEADER (header differs from desired) is a
+        # real "unowned entry, desired workspace set, refuse-to-touch-
+        # without-consent" conflict — the same shape as WARN_ONLY — so it
+        # surfaces _UNOWNED_CONFLICT_WARNING. STAMP_OWNERSHIP_ONLY (header
+        # already equals desired) has nothing to reconcile — routing is
+        # already correct — so it surfaces the distinct
+        # _STAMP_OWNERSHIP_ONLY_MESSAGE instead (D176 #4).
         gated_outcome = _workspace_config.gated_reconcile(
             cwd, cfg.state_db_path, cfg.api_base, cfg.api_key
         )
@@ -974,11 +998,14 @@ def main() -> None:
 
             if decision in (
                 _workspace_config.Decision.WARN_ONLY,
-                _workspace_config.Decision.STAMP_OWNERSHIP_ONLY,
                 _workspace_config.Decision.STAMP_OWNERSHIP_WRITE_HEADER,
             ):
                 print(_UNOWNED_CONFLICT_WARNING, end="\n")
                 _trace.write(conn, _SCRIPT, "workspace_unowned_conflict")
+
+            elif decision is _workspace_config.Decision.STAMP_OWNERSHIP_ONLY:
+                print(_STAMP_OWNERSHIP_ONLY_MESSAGE, end="\n")
+                _trace.write(conn, _SCRIPT, "workspace_stamp_ownership_only")
 
             elif decision in (
                 _workspace_config.Decision.CREATE_BASELINE,
@@ -1001,11 +1028,13 @@ def main() -> None:
             # Decision.NO_OP: already converged — deliberately silent, no
             # print and no trace beyond the "started" trace at the end of
             # main(). Decision.STAMP_OWNERSHIP_ONLY /
-            # STAMP_OWNERSHIP_WRITE_HEADER: handled above in the same
-            # branch as WARN_ONLY — reconcile() refuses to execute either
-            # (adoption requires human consent) and populates `error`,
-            # which is traced above; the warning print here is what makes
-            # that refusal visible to the human instead of silent.
+            # STAMP_OWNERSHIP_WRITE_HEADER: handled above, each in its own
+            # branch — reconcile() refuses to execute either (adoption
+            # requires human consent) and populates `error`, which is
+            # traced above; the print in each branch is what makes that
+            # refusal (STAMP_OWNERSHIP_WRITE_HEADER) or no-conflict state
+            # (STAMP_OWNERSHIP_ONLY) visible to the human instead of
+            # silent.
 
         # Step 9 — CLAUDE.md injection.
         _inject_claudemd(cwd)
