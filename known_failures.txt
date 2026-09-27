@@ -1,0 +1,49 @@
+# Known-failing tests baseline for neuroloom-claude-plugin, captured before D176
+# Phase 1 (#4) changes landed. These failures predate this plan and are out of
+# scope for D176 -- see docs/current_work/sdlc-lite/d176_search_memory_integrity_fixes_plan.md,
+# Phase 1 Guidance (#4): green gate is "new tests pass AND the remaining
+# failing set is a subset of this baseline," not "zero failures."
+#
+# Captured via: .venv/bin/python -m pytest tests/ -q --tb=no -rfE
+tests/integration/test_lifecycle.py::TestFullLifecycle::test_capture_buffers_on_api_500
+tests/integration/test_lifecycle.py::TestFullLifecycle::test_capture_posts_observation
+tests/integration/test_lifecycle.py::TestFullLifecycle::test_preload_context_inject_returns_additional_context
+tests/integration/test_lifecycle.py::TestFullLifecycle::test_second_session_start_ends_stale_and_flushes_buffer
+tests/integration/test_lifecycle.py::TestFullLifecycle::test_session_start_posts_to_sessions_start
+tests/integration/test_performance.py::TestCapturePerformance::test_capture_under_100ms
+tests/integration/test_performance.py::TestCodeGraphSyncPerformance::test_code_graph_sync_under_100ms
+tests/integration/test_performance.py::TestPreloadContextPerformance::test_preload_cache_hit_under_100ms
+tests/integration/test_performance.py::TestPreloadContextPerformance::test_preload_inject_under_100ms
+tests/integration/test_performance.py::TestSessionStartPerformance::test_session_start_under_100ms
+tests/test_capture.py::TestCorruptSession::test_corrupt_session_id_deleted
+tests/test_capture.py::TestEventBuffer::test_event_buffered_on_api_failure
+tests/test_capture.py::TestMcpFilter::test_mcp_neuroloom_tool_filtered
+tests/test_capture.py::TestNoApiKey::test_exits_without_db_open
+tests/test_capture.py::TestObservationPayload::test_observation_id_is_valid_uuid
+tests/test_capture.py::TestRateThrottle::test_rate_throttled_when_too_soon
+tests/test_code_graph_sync.py::TestDebounce::test_debounced_when_within_window
+tests/test_code_graph_sync.py::TestDebounce::test_sync_dispatched_when_outside_window
+tests/test_code_graph_sync.py::TestDebounceFilesAccumulation::test_duplicate_file_path_deduplicated
+tests/test_code_graph_sync.py::TestDebounceFilesAccumulation::test_multiple_files_accumulated
+tests/test_code_graph_sync.py::TestExtensionFilter::test_allowed_py_extension_passes
+tests/test_code_graph_sync.py::TestExtensionFilter::test_json_extension_filtered
+tests/test_code_graph_sync.py::TestExtensionFilter::test_ts_extension_passes
+tests/test_preload_context.py::TestCacheHit::test_cache_hit_no_api_call
+tests/test_preload_context.py::TestCacheTtl::test_expired_cache_treated_as_miss
+tests/test_preload_context.py::TestCircuitBreaker::test_circuit_breaker_active_no_http_call
+tests/test_preload_context.py::TestCorruptSession::test_corrupt_session_traces_and_continues
+tests/test_preload_context.py::TestEmptyResponseNotCached::test_empty_response_not_cached
+tests/test_preload_context.py::TestInjectMode::test_inject_returns_additional_context
+tests/test_preload_context.py::TestInjectMode::test_inject_returns_empty_dict_on_empty_context
+tests/test_preload_context.py::TestNudgeMode::test_glob_pattern_extracted
+tests/test_preload_context.py::TestNudgeMode::test_nudge_grep_pattern_extracted
+tests/test_preload_context.py::TestNudgeMode::test_nudge_unextractable_pattern_returns_empty
+tests/test_preload_context.py::TestTokenBudget::test_budget_exhausted_returns_empty
+tests/test_run_hook.py::test_venv_present_returns_venv_path
+tests/test_session_start.py::test_codeweaver_already_installed_skips_ensure
+tests/test_session_start.py::test_upgrade_if_stale_guards_when_not_installed
+tests/test_session_start.py::TestCorruptStaleSession::test_corrupt_session_deleted_and_traced
+tests/test_session_start.py::TestEventBufferFlush::test_buffer_flushed_on_start
+tests/test_session_start.py::TestSessionIdFormat::test_session_id_matches_pattern
+tests/test_session_start.py::TestSessionStartFailure::test_no_session_row_on_500
+tests/test_session_start.py::TestStaleSession::test_stale_session_ended
