@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import pyhooks.config as _config
+import pyhooks.containment as _containment
 import pyhooks.db as _db
 import pyhooks.trace as _trace
 
@@ -49,14 +50,13 @@ _ALLOWED_EXTENSIONS = {".ts", ".tsx", ".mts", ".py"}
 def _within_workspace(file_path: str, workspace_root: Path) -> bool:
     """Return True only if *file_path* resolves to a path inside *workspace_root*.
 
-    Uses ``Path.is_relative_to()`` rather than ``str.startswith()`` to prevent
-    path-traversal bypasses such as ``/workspace-evil/file.py`` matching
-    ``/workspace``.
+    Delegates to the shared rule in ``pyhooks.containment`` so there is one
+    definition of "inside".  *workspace_root* stays the process cwd here (not
+    ``CLAUDE_PROJECT_DIR``): codeweaver computes each stored symbol path as
+    ``relative_to(workspace_root)`` against this same directory, so it must be
+    the directory the stored paths are relative to.
     """
-    try:
-        return Path(file_path).resolve().is_relative_to(workspace_root)
-    except ValueError:
-        return False
+    return _containment.within_root(file_path, workspace_root)
 
 
 # ---------------------------------------------------------------------------

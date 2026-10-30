@@ -15,6 +15,34 @@ Design constraints
 - Never shares a SQLite connection across threads.  The background thread opens
   its own connection and closes it in a ``finally`` block.
 - All decisions are recorded via ``pyhooks.trace.write`` for post-hoc debugging.
+
+Containment
+-----------
+The whole PostToolUse event is uploaded as the observation, so an event about a
+file outside the project would upload that file's content (a Read's
+``tool_response.file.content``, a Write's ``content``).  Events for Read, Write,
+Edit, NotebookEdit, Glob and Grep whose target is outside the project root are
+therefore dropped entirely -- not sent and not buffered (step 8b).
+
+The project root is ``CLAUDE_PROJECT_DIR``, and it must be the directory the
+API key was read from (step 3b): after a ``cd`` into a sibling or nested project
+with its own ``.neuroloom.db``, this project's events would otherwise be
+uploaded with THAT project's key.  With ``CLAUDE_PROJECT_DIR`` unset the root
+falls back to the process cwd, which follows ``cd`` -- weaker, and traced as
+``project_root_fallback_cwd``.
+
+NOT contained, stated plainly:
+
+- Bash.  A command's output cannot be attributed to a path, so Bash events are
+  captured as before; ``cat /etc/hosts`` is still uploaded.  This is the main
+  remaining channel.
+- Agent.  A sub-agent's ``tool_response`` can summarise content from outside the
+  project.
+- Every observation carries ``transcript_path`` and ``cwd`` (the whole event is
+  uploaded), which include the user's home path.
+- WebFetch and WebSearch are not path-targeted and are unchanged.
+
+See ``pyhooks.containment``.
 """
 
 import json
@@ -28,6 +56,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pyhooks.containment as containment
 import pyhooks.trace as trace
 from pyhooks.config import Config, load
 from pyhooks.db import open_db
@@ -217,6 +246,20 @@ def main() -> None:
     try:
         workspace_key = str(Path(os.getcwd()).resolve())
 
+        # -------------------------------------------------------------- 3b
+        # The project root must be the directory the API key was read from.
+        # After a `cd` into a sibling or nested project with its own
+        # .neuroloom.db, this project's events would otherwise be uploaded with
+        # THAT project's key to ITS workspace -- fail closed.  Also trace when
+        # CLAUDE_PROJECT_DIR is unset and the root fell back to the process cwd
+        # (weaker: that cwd follows `cd`).  See pyhooks/containment.py.
+        project_root = containment.project_root()
+        if containment.project_root_is_fallback():
+            trace.write(conn, _SCRIPT, "project_root_fallback_cwd")
+        if not containment.credential_matches_root(config.state_db_path, project_root):
+            trace.write(conn, _SCRIPT, "credential_root_mismatch")
+            sys.exit(0)
+
         # -------------------------------------------------------------- 4
         row = conn.execute(
             "SELECT session_id, last_submit_ms FROM sessions WHERE session_key = ?",
@@ -268,6 +311,29 @@ def main() -> None:
                 conn,
                 _SCRIPT,
                 "mcp_filtered",
+                session_id=session_id,
+                tool_name=tool_name,
+            )
+            sys.exit(0)
+
+        # -------------------------------------------------------------- 8b
+        # Drop events whose target is outside the project root: the event
+        # carries the target's content, which must not leave the machine.
+        # Placed before the rate-limit bookkeeping so a dropped event neither
+        # consumes the throttle window nor is buffered for replay.  The root is
+        # CLAUDE_PROJECT_DIR and relative targets resolve against the event's
+        # own `cwd` -- not workspace_key, the process cwd, which follows `cd`.
+        _raw_tool_input = data.get("tool_input")
+        if containment.tool_targets_outside_root(
+            tool_name,
+            _raw_tool_input if isinstance(_raw_tool_input, dict) else {},
+            project_root,
+            containment.session_cwd(data),
+        ):
+            trace.write(
+                conn,
+                _SCRIPT,
+                "outside_project",
                 session_id=session_id,
                 tool_name=tool_name,
             )

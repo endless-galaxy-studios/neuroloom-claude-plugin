@@ -15,6 +15,18 @@ import pyhooks.config as _config_mod
 import pyhooks.db as _db_mod
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_project_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove CLAUDE_PROJECT_DIR so the host environment cannot leak into a test.
+
+    Claude Code exports it to hook processes, so it can be set when this suite
+    is run from inside a session.  It defines the containment root
+    (``pyhooks.containment.project_root``); a test that wants one sets it
+    explicitly, after this fixture has cleared it.
+    """
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
     """Return a path inside ``tmp_path`` where the test database will live.
