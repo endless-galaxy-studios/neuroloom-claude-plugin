@@ -122,7 +122,7 @@ All hooks are Python modules in `pyhooks/`, launched via `run_hook.py`. When a `
 **SessionStart** — opens a Neuroloom session, replays any buffered observations from the previous session, injects the memory-first rule into `CLAUDE.md` if absent, and prints the tool catalog so Claude knows what's available.
 
 **PreToolUse (context injection)** — fires before `Read`, `Glob`, and `Grep`. Two modes:
-- **Inject** (on `Read`) — queries Neuroloom's context endpoint with the file path and injects relevant memories as `additionalContext` before Claude sees the file.
+- **Inject** (on `Read`) — queries Neuroloom's context endpoint with the file path and injects relevant memories (as `hookSpecificOutput.additionalContext`) before Claude sees the file.
 - **Nudge** (on `Glob`/`Grep`) — extracts a meaningful query from the search pattern and injects a compact reminder to check Neuroloom for related context.
 
 Includes a circuit breaker (30s cooldown on API failures), response caching (1hr TTL), and a per-session token budget (~30K chars) to avoid flooding the context window.
@@ -141,7 +141,7 @@ When you edit TypeScript or Python files, the plugin automatically parses each f
 
 ## CI mode
 
-CI mode is for **headless** runs: Claude Code started by a script (for example `claude -p` in a GitHub Actions job) with nobody at the keyboard. In that setting the normal hooks are the wrong behaviour. They edit tracked files (`.gitignore`, `CLAUDE.md`, `.mcp.json`), install packages from PyPI, start background threads that can outlive the hook, and upload everything the agent does. CI mode turns all of that off and keeps one thing: it sends memory lookups before the agent reads a file.
+CI mode is for **headless** runs: Claude Code started by a script (for example `claude -p` in a GitHub Actions job) with nobody at the keyboard. In that setting the normal hooks are the wrong behaviour. They edit tracked files (`.gitignore`, `CLAUDE.md`, `.mcp.json`), install packages from PyPI, start background threads that can outlive the hook, and upload everything the agent does. CI mode turns all of that off and keeps one thing: it injects memories before the agent reads a file.
 
 The CI-mode contract, in one place:
 
@@ -296,7 +296,7 @@ Do not reuse a CI database in a normal-mode session. CI rows are written with th
 
 ### Known limits
 
-- **Memory lookups may not reach the agent on Claude Code 2.1.314.** `preload_context` returns its result as top-level `additionalContext`. In one manual run on 2.1.314 the request went out and the hook printed the text, but the model did not receive it; it did receive the same text when the hook used `hookSpecificOutput.additionalContext` instead. This affects normal mode too. So "Memory lookups are on" in the ready line means the lookup is sent, not that the agent read the result. A fix is pending a decision.
+- **Injected memories need this release on Claude Code 2.1.314.** `preload_context` now returns its result as `hookSpecificOutput.additionalContext` (with `hookEventName` `PreToolUse`). Earlier plugin versions printed a top-level `additionalContext`, which Claude Code 2.1.314 ignored, so the model never received the injected text, in normal mode too.
 - **Developed and checked on macOS with Claude Code 2.1.314.** The z-sdlc smoke job in GitHub Actions has not run yet.
 - **`CLAUDE_PROJECT_DIR` unset in CI** makes the root fall back to the hook process's working directory, so an agent `cd` makes the hooks dormant. Set it, or start the agent in the seeded directory.
 - **Skills still use the directory you run them from.** `/neuroloom:status`, `/neuroloom:init` and `scripts/seed_code_graph.py` read `.neuroloom.db` from the current directory, not from the project root. Run from a subdirectory, a skill can look at a different (or missing) database than the hooks do. Hooks follow the project root; skills have not been moved.

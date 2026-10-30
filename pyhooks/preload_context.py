@@ -5,7 +5,8 @@ Supports two modes, determined by the tool_name field in the stdin JSON:
 
     inject  — fired when tool_name == "Read": queries the composite
               POST /api/v1/context endpoint with format=inject and writes
-              additionalContext into the Claude conversation window.
+              hookSpecificOutput.additionalContext into the Claude conversation
+              window.
 
     nudge   — fired when tool_name in ("Glob", "Grep") or when tool_name ==
               "Bash" with a bfs or ugrep subcommand (native macOS/Linux builds
@@ -16,7 +17,9 @@ Supports two modes, determined by the tool_name field in the stdin JSON:
 
 Writes a Claude hook JSON object to stdout:
 
-    {"additionalContext": "<text>"}   — when context is available
+    {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                            "additionalContext": "<text>"}}
+                                      — when context is available
     {}                                — when context is empty, budget exhausted,
                                         or any failure
 
@@ -30,8 +33,9 @@ Uses only stdlib — zero pip dependencies.
 Exit code is always 0.  A crash here must never block Claude from reading
 a file.
 
-Domain note: "additionalContext" is the Claude hook protocol field that
-injects text into Claude's context window before the tool runs — like sticky
+Domain note: "hookSpecificOutput.additionalContext" is the Claude hook
+protocol field (PreToolUse form; the top-level form is ignored by Claude Code
+2.1.314) that injects text into Claude's context window before the tool runs — like sticky
 notes placed on a file before someone opens it, giving relevant background
 without having to ask for it.
 """
@@ -778,16 +782,27 @@ def main() -> None:
 
         # --------------------------------------------------------------
         # Inject context
-        # "additionalContext" is the Claude hook protocol mechanism for
-        # inserting text into the conversation window before the tool
-        # runs.  Omit "permissionDecisionReason" entirely — that field
-        # is for blocking hooks, not passive injection hooks.
+        # "hookSpecificOutput.additionalContext" is the Claude hook protocol
+        # mechanism for inserting text into the conversation window around
+        # the tool call.  Claude Code 2.1.314 ignores a top-level
+        # "additionalContext", so the PreToolUse envelope is required.
+        # Omit "permissionDecision" and "permissionDecisionReason"
+        # entirely — those are for gating hooks, not passive injection.
         # --------------------------------------------------------------
         if mode == "nudge":
             _trace_mod.write(conn, "preload_context", "nudge_injected")
         else:
             _trace_mod.write(conn, "preload_context", "injected")
-        print(json.dumps({"additionalContext": injection_text}))
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": injection_text,
+                    }
+                }
+            )
+        )
 
     finally:
         if conn is not None:

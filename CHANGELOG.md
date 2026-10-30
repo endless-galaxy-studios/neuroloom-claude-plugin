@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **CI mode.** `NEUROLOOM_MODE=ci` turns on a mode for unattended runs (for example `claude -p` in a GitHub Actions job). In CI mode no hook edits a tracked file, runs `git`, `pip` or `venv`, makes an upload, or starts a thread or subprocess; the only network call is the `POST /api/v1/context` lookup in `preload_context` (see Known limits in the README: the result may not reach the agent on Claude Code 2.1.314). See the README's "CI mode" section for every hook.
+- **CI mode.** `NEUROLOOM_MODE=ci` turns on a mode for unattended runs (for example `claude -p` in a GitHub Actions job). In CI mode no hook edits a tracked file, runs `git`, `pip` or `venv`, makes an upload, or starts a thread or subprocess; the only network call is the `POST /api/v1/context` lookup in `preload_context` (`preload_context` delivers it through `hookSpecificOutput`; see "Fixed"). See the README's "CI mode" section for every hook.
   - `session_start` prints exactly one of these lines on stdout:
     - `[Neuroloom CI mode] Ready. Memory lookups are on; observations are not uploaded.`
     - `[Neuroloom CI mode] No project key was seeded, so Neuroloom is off for this job.`
@@ -39,8 +39,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Nested projects now send under the root's key.** A `cd` into a nested project that has its own `.neuroloom.db` used to make `preload_context`, `capture` and `cache_prefetch` skip. They now send, under the **root's** key, so that nested repository's content goes to the root's workspace. The inverse case also exists: a session started in a directory with no key stays dormant after a `cd` into a sub-project that has one, because the root decides.
 - `code_graph_sync` takes the project root as its root, and resolves a relative `file_path` against the event's `cwd` rather than the process's. It now exits when the event's `cwd` is not an existing directory. This supersedes the 0.9.2 statement that it keeps the hook's working directory as its root.
 - **`.neuroloom.db*` replaces `.neuroloom.db` in `.gitignore`.** Outside CI mode, `session_start` now writes `.neuroloom.db*` (covering `-wal` and `-shm`) and counts a project as covered only when that exact line is present, so a project with only the bare entry gets `.neuroloom.db*` appended once. CI mode never edits `.gitignore`. The README's post-installation step now says `.neuroloom.db*`.
+- **`preload_context` stdout contract.** When it has context to inject, it prints `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "<text>"}}` instead of `{"additionalContext": "<text>"}`. It sets no `permissionDecision`, so the tool call is not gated. The no-context and dormant output is still `{}`. Anything that parses the old top-level key must read `hookSpecificOutput.additionalContext`.
 - The README's advice to set `NEUROLOOM_CODEWEAVER_OFFLINE` "in CI" is corrected: CI mode skips the codeweaver install and upgrade outright, and outside CI mode the variable skips the install but a version check against PyPI can still run when `neuroloom-codeweaver` is importable.
 - The SDLC plugin's hooks read the key through `config.load()`, so they inherit the root's key and the root cutover along with the base hooks. In CI mode the SDLC plugin finds this plugin only through `NEUROLOOM_CLAUDE_PLUGIN_ROOT`; see its changelog.
+
+### Fixed
+
+- **`preload_context` injected text now reaches the model.** It printed a top-level `additionalContext`, which Claude Code 2.1.314 ignores, so injected memories (and nudges) never reached the model, in normal mode as well as CI mode. It now emits the `hookSpecificOutput` shape (see "Changed"). Confirmed by a manual probe: the model quoted the `PreToolUse:Read hook additional context` reminder.
 
 ### Removed
 

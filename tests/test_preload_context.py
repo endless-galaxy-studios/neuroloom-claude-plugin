@@ -144,8 +144,9 @@ class TestInjectMode:
             fetch_return=("Memory context for api.py", 300),
         )
         out = json.loads(stdout)
-        assert "additionalContext" in out
-        assert "Memory context for api.py" in out["additionalContext"]
+        assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in out["hookSpecificOutput"]
+        assert "Memory context for api.py" in out["hookSpecificOutput"]["additionalContext"]
 
     def test_inject_returns_empty_dict_on_empty_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -187,7 +188,8 @@ class TestNudgeMode:
             fetch_return=("Auth handler memory nudge", 300),
         )
         out = json.loads(stdout)
-        assert "additionalContext" in out
+        assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in out["hookSpecificOutput"]
 
     def test_nudge_unextractable_pattern_returns_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -225,7 +227,8 @@ class TestNudgeMode:
             fetch_return=("Auth service nudge", 300),
         )
         out = json.loads(stdout)
-        assert "additionalContext" in out
+        assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in out["hookSpecificOutput"]
 
 
 class TestCircuitBreaker:
@@ -324,8 +327,9 @@ class TestCacheHit:
 
         assert fetch_calls == [], "API should not be called on cache hit"
         out = json.loads(output.getvalue())
-        assert "additionalContext" in out
-        assert "Cached context text" in out["additionalContext"]
+        assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in out["hookSpecificOutput"]
+        assert "Cached context text" in out["hookSpecificOutput"]["additionalContext"]
 
 
 class TestCacheTtl:
@@ -380,7 +384,7 @@ class TestCacheTtl:
 
         assert len(fetch_calls) == 1, "Expired cache should trigger an API call"
         out = json.loads(output.getvalue())
-        assert "Fresh context" in out.get("additionalContext", "")
+        assert "Fresh context" in out.get("hookSpecificOutput", {}).get("additionalContext", "")
 
 
 class TestTokenBudget:
@@ -487,7 +491,8 @@ class TestCorruptSession:
 
         # The hook should still attempt to inject (using workspace_root as fallback session_id)
         out = json.loads(stdout)
-        assert "additionalContext" in out
+        assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in out["hookSpecificOutput"]
 
 
 class TestExtractQuery:

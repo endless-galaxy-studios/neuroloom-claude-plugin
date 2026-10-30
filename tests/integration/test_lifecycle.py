@@ -305,21 +305,10 @@ class TestFullLifecycle:
             _pc_mod.main()
 
         result = json.loads(output.getvalue())
-        assert "additionalContext" in result, f"Expected additionalContext in output, got: {result}"
-        assert "Relevant memory for api.py" in result["additionalContext"]
+        assert "hookSpecificOutput" in result, f"Expected hookSpecificOutput in output, got: {result}"
+        assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "Relevant memory for api.py" in result["hookSpecificOutput"]["additionalContext"]
 
-
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "Claude Code 2.1.314 ignores the top-level {'additionalContext': ...} shape that "
-            "preload_context prints (d178d result doc, 'Phase 6 - Manual QA'); only "
-            "{'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': ...}} reaches the model. "
-            "Strict: this flips to a failure (XPASS) the day the product is fixed, which is the signal to "
-            "delete the marker and update test_preload_context_inject_returns_additional_context."
-        ),
-    )
     def test_preload_context_uses_the_pretooluse_hook_specific_output_shape(
         self,
         tmp_path: Path,

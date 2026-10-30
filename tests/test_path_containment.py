@@ -421,7 +421,7 @@ class TestPreloadRead:
         # The API gets the path RELATIVE to the project root (it matches symbol paths
         # stored that way); the absolute `target` never leaves the machine.
         assert fetch.call_args.args[2] == "src/auth_handler.py"
-        assert out == {"additionalContext": "Relevant context"}
+        assert out == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "Relevant context"}}
         assert _query(project, "SELECT COUNT(*) FROM cache") == [(1,)]
 
     def test_inside_root_via_inside_symlink_sends(
@@ -431,7 +431,7 @@ class TestPreloadRead:
             project, monkeypatch, capsys, _read(str(project.root / "inner_link" / "auth_handler.py"))
         )
         fetch.assert_called_once()
-        assert "additionalContext" in out
+        assert "additionalContext" in out["hookSpecificOutput"]
 
     @pytest.mark.parametrize(
         "target",
@@ -472,7 +472,7 @@ class TestPreloadGlobGrep:
         fetch.assert_called_once()
         assert fetch.call_args.kwargs["query"] == "auth_handler"
         assert fetch.call_args.kwargs["fmt"] == "nudge"
-        assert "additionalContext" in out
+        assert "additionalContext" in out["hookSpecificOutput"]
 
     def test_glob_inside_path_sends(
         self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -2458,7 +2458,7 @@ class TestPreloadSendsRootRelativePath:
         out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
 
         assert bodies == [{"file_path": expected, "format": "inject"}]
-        assert out == {"additionalContext": "CTX"}
+        assert out == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "CTX"}}
 
     def test_the_absolute_project_path_is_nowhere_in_the_request(
         self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -2543,7 +2543,7 @@ class TestPreloadSendsRootRelativePath:
 
         out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
         assert bodies == []  # served from the cache: no second request
-        assert out == {"additionalContext": "CTX"}
+        assert out == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "CTX"}}
 
 
 class TestRelativePathMatchesTheCodeGraph:
