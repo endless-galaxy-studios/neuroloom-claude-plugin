@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -120,6 +121,20 @@ def test_tree_hash_ignores_db_but_presence_snapshot_sees_it(tmp_path: Path) -> N
     assert ci_support.presence_snapshot(tmp_path, exclude=(".neuroloom.db*",)) == names_before
 
 
+def test_presence_exclusion_matches_the_relative_path_not_the_file_name(tmp_path: Path) -> None:
+    """``.neuroloom.db*`` hides the root-level database only, never ``sub/.neuroloom.db``."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / ".neuroloom.db").write_bytes(b"db")
+    (tmp_path / ".neuroloom.db-wal").write_bytes(b"wal")
+    (tmp_path / "sub" / ".neuroloom.db").write_bytes(b"stray")
+    names = ci_support.presence_snapshot(tmp_path, exclude=(".neuroloom.db*",))
+    assert names == ["sub/.neuroloom.db"]
+    assert ci_support.presence_snapshot(tmp_path, exclude=("sub/.neuroloom.db",)) == [
+        ".neuroloom.db",
+        ".neuroloom.db-wal",
+    ]
+
+
 def test_tree_hash_changes_on_edit_and_on_new_file(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("one", encoding="utf-8")
     base = ci_support.tree_hash(tmp_path)
@@ -157,6 +172,24 @@ def test_bait_untouched_before_any_hook_runs(bait_repo: ci_support.Bait) -> None
         "claudemd_appended": False,
         "buffer_flushed": False,
     }
+
+
+def test_bait_buffer_trigger_checks_seeded_ids_not_the_row_count(bait_repo: ci_support.Bait) -> None:
+    """A flush followed by new rows (as a CI capture adds) must still fire the trigger."""
+    assert len(bait_repo.seeded_buffer_ids) == bait_repo.seeded_buffer_rows == 3
+    conn = sqlite3.connect(str(bait_repo.db_path))
+    try:
+        conn.execute("DELETE FROM event_buffer WHERE id = ?", (bait_repo.seeded_buffer_ids[0],))
+        for n in range(5):
+            conn.execute(
+                "INSERT INTO event_buffer (payload, created_at, payload_type) VALUES (?, ?, ?)",
+                ("{}", 1.0 + n, "observation"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    assert bait_repo.buffer_rows() >= bait_repo.seeded_buffer_rows, "fixture error: count masks the delete"
+    assert bait_repo.fired()["buffer_flushed"] is True
 
 
 def test_bait_every_trigger_fires_against_todays_session_start(
@@ -418,3 +451,106 @@ def test_runner_control_shim_noop_is_live_for_session_start(
     )
     assert run.returncode == 0
     assert marker.exists(), "the shim's bootstrap replacement was not the code that ran"
+
+
+# ---------------------------------------------------------------------------
+# SlimRecorder, egress shim, codeweaver stub, interpreter params
+# ---------------------------------------------------------------------------
+
+
+def test_slim_recorder_keeps_bodies_and_a_carried_flag_but_no_headers() -> None:
+    import urllib.request
+
+    rec = ci_support.SlimRecorder()
+    try:
+        for token in (ci_support.SENTINEL_KEY, "someone-else"):
+            req = urllib.request.Request(
+                rec.url + "/api/v1/x", data=b"body-" + token[:3].encode(), method="POST",
+                headers={"Authorization": f"Token {token}"},
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+        assert rec.requests == [("POST", "/api/v1/x", True), ("POST", "/api/v1/x", False)]
+        assert rec.bodies == [b"body-e38", b"body-som"]
+        assert rec.paths() == [("POST", "/api/v1/x")] * 2
+        assert not any(isinstance(v, (str, bytes)) and ci_support.SENTINEL_KEY in v
+                       for r in rec.requests for v in r)
+    finally:
+        rec.close()
+
+
+def _run_probe(source: str, tmp_path: Path, shim_dir: Path | None, log: Path | None, **extra: str) -> subprocess.CompletedProcess[str]:
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
+    paths = [str(p) for p in (shim_dir,) if p is not None]
+    if paths:
+        env["PYTHONPATH"] = os.pathsep.join(paths)
+    if log is not None:
+        env[ci_support.EGRESS_LOG_ENV] = str(log)
+    env.update(extra)
+    return subprocess.run(
+        [sys.executable, "-c", source], capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=30, check=False
+    )
+
+
+_EGRESS_PROBE = """
+import socket, urllib.request
+out = []
+for fn in (
+    lambda: urllib.request.urlopen("https://pypi.org/pypi/x/json", timeout=1),
+    lambda: socket.create_connection(("203.0.113.9", 80), timeout=1),
+    lambda: socket.socket().connect(("203.0.113.9", 80)),
+):
+    try:
+        fn()
+        out.append("passed")
+    except OSError:
+        out.append("blocked")
+print(",".join(out))
+"""
+
+
+def test_egress_shim_records_and_blocks_external_calls_but_not_loopback(
+    tmp_path: Path, black_hole: ci_support.BlackHole
+) -> None:
+    shim_dir, log = ci_support.write_egress_shim(tmp_path / "shim")
+    done = _run_probe(_EGRESS_PROBE, tmp_path, shim_dir, log)
+    assert done.stdout.strip() == "blocked,blocked,blocked"
+    lines = ci_support.egress_attempts(log)
+    assert any(ln.startswith("urlopen pypi.org") for ln in lines)
+    assert "connect 203.0.113.9" in lines and "resolve 203.0.113.9" in lines
+    # Loopback goes through untouched and leaves no record.
+    log.unlink()
+    loop = _run_probe(
+        f"import socket; socket.create_connection(('127.0.0.1', {black_hole.port}), timeout=2).close(); print('ok')",
+        tmp_path, shim_dir, log,
+    )
+    assert loop.stdout.strip() == "ok"
+    assert ci_support.egress_attempts(log) == []
+
+
+def test_egress_shim_can_hide_the_codeweaver_distribution(tmp_path: Path) -> None:
+    shim_dir, _log = ci_support.write_egress_shim(tmp_path / "shim")
+    probe = (
+        "import importlib.metadata as m\n"
+        "try:\n    m.version('neuroloom-codeweaver'); print('visible')\n"
+        "except m.PackageNotFoundError:\n    print('hidden')"
+    )
+    hidden = _run_probe(probe, tmp_path, shim_dir, None, **{ci_support.EGRESS_HIDE_CODEWEAVER_ENV: "1"})
+    assert hidden.stdout.strip() == "hidden"
+
+
+def test_codeweaver_stub_is_importable_through_pythonpath(tmp_path: Path) -> None:
+    stub = ci_support.write_codeweaver_stub(tmp_path / "stub")
+    code = (
+        "import codeweaver, pathlib\n"
+        "r = codeweaver.parse_files([pathlib.Path('a.py')], pathlib.Path('.'))\n"
+        "print(r['stub'], r['files'])"
+    )
+    done = _run_probe(code, tmp_path, stub, None)
+    assert done.stdout.strip() == "True ['a.py']"
+
+
+def test_interpreter_params_always_lists_both_interpreters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEUROLOOM_TEST_PY310", "/nonexistent/python3.10")
+    params = ci_support.interpreter_params()
+    assert [p.id for p in params] == ["suite-python", "py310"]
+    assert any(m.name == "skipif" and m.args == (True,) for m in params[1].marks), "missing interpreter must be a SKIP"

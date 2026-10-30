@@ -16,6 +16,8 @@ Contents (each has a self-test in ``tests/test_ci_support.py``):
 * ``tree_hash`` / ``presence_snapshot`` -- "did the checkout change?" detectors.
 * ``forbid_side_effects``  -- patches thread/subprocess/network entry points to raise a
                               ``BaseException`` sentinel that ``except Exception`` cannot swallow.
+* ``SlimRecorder``         -- loopback API stand-in; bodies retained, headers never.
+* ``write_egress_shim`` / ``write_codeweaver_stub`` / ``interpreter_params`` -- hermeticity helpers.
 * ``run_hook``             -- subprocess hook runner with a minimal, explicit environment.
 * ``registered_hook_modules`` -- hook modules listed in ``hooks/hooks.json``.
 * ``credential_env_names`` -- environment names that look like credentials.
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.server
 import json
 import os
 import re
@@ -48,9 +51,11 @@ from typing import Any
 # Root of the plugin checkout this module lives in (``<root>/tests/ci_support.py``).
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
-# A recognisable fake credential.  If it ever shows up in an output stream the
-# leak is obvious; it is not a real key for anything.
-SENTINEL_KEY = "nl-sentinel-0123456789abcdef"
+# DUMMY credential for tests only; it is not a real key for anything.  It is
+# shaped like a real one (40 lowercase hex characters, high entropy, nothing
+# sequential) so the sweep's partial-match logic is exercised on realistic data
+# instead of a pattern that is trivially easy to spot.
+SENTINEL_KEY = "e3807da0816f1b2484e68c8d42e76ded1a95d810"
 
 _CREDENTIAL_NAME_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "BEARER")
 
@@ -267,23 +272,22 @@ def presence_snapshot(
 
     *exclude* is caller-supplied: nothing is hidden by default, so a stray
     ``.neuroloom.db`` created by a hook that should have stayed dormant shows
-    up here even though ``tree_hash`` ignores it.  Entries in *exclude* match a
-    file name exactly or as a prefix when they end with ``*``.
+    up here even though ``tree_hash`` ignores it.  Entries in *exclude* are
+    matched against the RELATIVE path (POSIX separators), exactly or as a
+    prefix when they end with ``*``; ``.neuroloom.db*`` therefore hides the
+    root-level database and sidecars only, never ``sub/.neuroloom.db``.
     """
 
-    def _excluded(name: str) -> bool:
+    def _excluded(rel: str) -> bool:
         for pattern in exclude:
-            if pattern.endswith("*") and name.startswith(pattern[:-1]):
+            if pattern.endswith("*") and rel.startswith(pattern[:-1]):
                 return True
-            if name == pattern:
+            if rel == pattern:
                 return True
         return False
 
-    return sorted(
-        str(p.relative_to(root))
-        for p in _iter_files(root, skip_dirs)
-        if not _excluded(p.name)
-    )
+    names = (p.relative_to(root).as_posix() for p in _iter_files(root, skip_dirs))
+    return sorted(n for n in names if not _excluded(n))
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +332,8 @@ class Bait:
     seeded_claudemd: bytes
     seeded_mcp_json: bytes | None
     seeded_buffer_rows: int
+    # Primary keys of the seeded ``event_buffer`` rows (AUTOINCREMENT, so never reused).
+    seeded_buffer_ids: list[int] = field(default_factory=list)
     triggers: list[Trigger] = field(default_factory=list)
 
     def fired(self) -> dict[str, bool]:
@@ -355,7 +361,17 @@ def _trigger_claudemd(bait: Bait) -> bool:
 
 
 def _trigger_buffer(bait: Bait) -> bool:
-    return bait.buffer_rows() < bait.seeded_buffer_rows
+    """True when ANY seeded buffer row is gone.
+
+    Counting rows would be blind to a flush followed by new rows (a CI capture
+    legitimately adds local rows), so the seeded ids themselves are checked.
+    """
+    conn = sqlite3.connect(str(bait.db_path))
+    try:
+        present = {int(r[0]) for r in conn.execute("SELECT id FROM event_buffer")}
+    finally:
+        conn.close()
+    return any(i not in present for i in bait.seeded_buffer_ids)
 
 
 def _trigger_mcp_json(bait: Bait) -> bool:
@@ -393,7 +409,7 @@ def make_bait_repo(
     =================  ==================================================
     gitignore_written  ``.gitignore`` bytes differ from the seeded bytes
     claudemd_appended  ``CLAUDE.md`` differs / now carries the marker
-    buffer_flushed     fewer ``event_buffer`` rows than were seeded
+    buffer_flushed     any seeded ``event_buffer`` row id is gone
     mcp_json_written   (armed only) ``.mcp.json`` now exists
     =================  ==================================================
     """
@@ -455,7 +471,7 @@ def make_bait_repo(
             (str(root.resolve()), _STALE_SESSION_ID),
         )
         conn.commit()
-        rows = int(conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0])
+        seeded_ids = [int(r[0]) for r in conn.execute("SELECT id FROM event_buffer ORDER BY id")]
     finally:
         conn.close()
 
@@ -467,7 +483,8 @@ def make_bait_repo(
         seeded_gitignore=(root / ".gitignore").read_bytes(),
         seeded_claudemd=(root / "CLAUDE.md").read_bytes(),
         seeded_mcp_json=seeded_mcp,
-        seeded_buffer_rows=rows,
+        seeded_buffer_rows=len(seeded_ids),
+        seeded_buffer_ids=seeded_ids,
     )
     bait.triggers = [
         Trigger("gitignore_written", "a state-db entry is added to .gitignore", _trigger_gitignore),
@@ -511,6 +528,102 @@ def join_hook_threads(timeout: float = 5.0) -> None:
         if thread is threading.current_thread() or thread.daemon:
             continue
         thread.join(timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Slim recorder: records (method, path, carried-the-key) and bodies, never headers
+# ---------------------------------------------------------------------------
+
+
+class SlimRecorder:
+    """Loopback API stand-in.  Bodies retained; headers never.
+
+    ``requests`` holds ``(method, path-with-query, carried_key)`` triples, where
+    ``carried_key`` is a boolean computed inside the handler, so a failing
+    assertion cannot print a credential.  ``bodies`` is parallel to
+    ``requests`` and holds the raw request bodies (the key travels in a header
+    only, so a body containing it is itself a finding).
+
+    ``reflect_401=True`` answers everything with 401 and a JSON body that echoes
+    the request headers (the key included); it exists to prove hooks never copy
+    a response body into an output.  ``status_overrides`` maps a bare path to a
+    status code for that endpoint.
+    """
+
+    def __init__(
+        self,
+        *,
+        key: str = SENTINEL_KEY,
+        reflect_401: bool = False,
+        status_overrides: dict[str, int] | None = None,
+        sdlc_latest: str = "2.0.0",
+        sdlc_seeded: str | None = "1.0.0",
+    ) -> None:
+        self.requests: list[tuple[str, str, bool]] = []
+        self.bodies: list[bytes] = []
+        recorder = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def _handle(self) -> None:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(length) if length else b""
+                carried = self.headers.get("Authorization") == f"Token {key}"
+                recorder.requests.append((self.command, self.path, carried))
+                recorder.bodies.append(body)
+                bare = self.path.split("?", 1)[0]
+                if reflect_401:
+                    status = 401
+                    payload: Any = {"detail": "invalid token", "echo": dict(self.headers)}
+                else:
+                    status = (status_overrides or {}).get(bare, 200)
+                    payload = _canned(bare, self.path, body, sdlc_latest, sdlc_seeded)
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self) -> None:  # noqa: N802
+                self._handle()
+
+            def do_GET(self) -> None:  # noqa: N802
+                self._handle()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def paths(self) -> list[tuple[str, str]]:
+        return [(m, p) for m, p, _ in self.requests]
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _canned(bare: str, full: str, body: bytes, sdlc_latest: str, sdlc_seeded: str | None) -> Any:
+    if bare == "/api/v1/sessions/start":
+        return {"session_id": "sess-ok"}
+    if bare == "/api/v1/documents/ingest/batch":
+        try:
+            docs = json.loads(body.decode("utf-8")).get("documents", [])
+        except Exception:
+            docs = []
+        return {"results": [{"index": i, "title": d.get("title"), "status": "created"} for i, d in enumerate(docs)]}
+    if bare == "/api/v1/context":
+        return {"injection_text": "context text", "cache_hint_ttl_seconds": 300}
+    if bare == "/api/v1/sdlc/cc-sdlc-version":
+        return {"version": sdlc_latest}
+    if bare == "/api/v1/memories/":
+        tags = ["sdlc:sentinel"] + ([f"sdlc:seed-version:{sdlc_seeded}"] if sdlc_seeded else [])
+        return [{"tags": tags}]
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +724,163 @@ def registered_hook_modules(plugin_root: Path | None = None) -> list[str]:
                 if match and match.group(1) not in modules:
                     modules.append(match.group(1))
     return modules
+
+
+# ---------------------------------------------------------------------------
+# Hermeticity helpers: egress shim, codeweaver stub, interpreter parameters
+# ---------------------------------------------------------------------------
+
+EGRESS_LOG_ENV = "NEUROLOOM_TEST_EGRESS_LOG"
+EGRESS_HIDE_CODEWEAVER_ENV = "NEUROLOOM_TEST_EGRESS_HIDE_CODEWEAVER"
+
+# Python 3.10 compatible.  Imported automatically by the interpreter (it is a
+# ``sitecustomize`` module) when its directory is on PYTHONPATH.
+_EGRESS_SHIM_SOURCE = '''\
+import os, socket, urllib.parse, urllib.request
+
+_LOG = os.environ.get("NEUROLOOM_TEST_EGRESS_LOG")
+
+
+def _record(kind, host):
+    if _LOG:
+        try:
+            with open(_LOG, "a", encoding="utf-8") as fh:
+                fh.write(kind + " " + str(host) + "\\n")
+        except OSError:
+            pass
+
+
+def _loop(host):
+    host = str(host)
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
+_orig_connect = socket.socket.connect
+_orig_connect_ex = socket.socket.connect_ex
+_orig_getaddrinfo = socket.getaddrinfo
+_orig_urlopen = urllib.request.urlopen
+
+
+def _connect(self, address):
+    if isinstance(address, tuple) and address and not _loop(address[0]):
+        _record("connect", address[0])
+        raise OSError("non-loopback connect blocked by the egress shim")
+    return _orig_connect(self, address)
+
+
+def _connect_ex(self, address):
+    if isinstance(address, tuple) and address and not _loop(address[0]):
+        _record("connect", address[0])
+        return 111
+    return _orig_connect_ex(self, address)
+
+
+def _getaddrinfo(host, *args, **kwargs):
+    if host is not None and not _loop(host):
+        _record("resolve", host)
+        raise socket.gaierror("non-loopback name resolution blocked by the egress shim")
+    return _orig_getaddrinfo(host, *args, **kwargs)
+
+
+def _urlopen(target, *args, **kwargs):
+    url = target.full_url if hasattr(target, "full_url") else str(target)
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if not _loop(host):
+        _record("urlopen", host)
+        raise OSError("non-loopback urlopen blocked by the egress shim")
+    return _orig_urlopen(target, *args, **kwargs)
+
+
+socket.socket.connect = _connect
+socket.socket.connect_ex = _connect_ex
+socket.getaddrinfo = _getaddrinfo
+urllib.request.urlopen = _urlopen
+
+if os.environ.get("NEUROLOOM_TEST_EGRESS_HIDE_CODEWEAVER") == "1":
+    # Hide the codeweaver DISTRIBUTION from importlib.metadata so the upgrade
+    # check (which the offline flag does not skip) cannot run: the sweep then
+    # sees only egress that is NOT the known PyPI check.
+    import importlib.metadata as _md
+
+    _orig_version = _md.version
+
+    def _version(name):
+        if str(name).lower().replace("_", "-") == "neuroloom-codeweaver":
+            raise _md.PackageNotFoundError(name)
+        return _orig_version(name)
+
+    _md.version = _version
+'''
+
+_CODEWEAVER_STUB_SOURCE = '''\
+"""Test stub for ``codeweaver``: exposes only what pyhooks/code_graph_sync.py imports."""
+
+
+def parse_files(paths, workspace_root):
+    return {
+        "stub": True,
+        "workspace_root": str(workspace_root),
+        "files": [str(p) for p in paths],
+    }
+'''
+
+
+def write_egress_shim(directory: Path) -> tuple[Path, Path]:
+    """Write ``sitecustomize.py`` into *directory*; return ``(directory, log_path)``.
+
+    Put *directory* on PYTHONPATH and set ``EGRESS_LOG_ENV`` to the returned log
+    path.  Any non-loopback ``urlopen``, name resolution or ``socket.connect`` is
+    recorded (host name only) and refused.  The log lives outside every tree the
+    key-hygiene sweep scans.  It only takes effect for an interpreter that
+    honours PYTHONPATH (the normal-mode launcher; not the ``-I`` CI launcher).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "sitecustomize.py").write_text(_EGRESS_SHIM_SOURCE, encoding="utf-8")
+    return directory, directory.parent / (directory.name + ".log")
+
+
+def egress_attempts(log_path: Path) -> list[str]:
+    """Lines recorded by the egress shim (``kind host``); empty when none."""
+    if not log_path.exists():
+        return []
+    return [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln]
+
+
+def write_codeweaver_stub(directory: Path) -> Path:
+    """Write a stub ``codeweaver`` package into *directory* and return it.
+
+    On PYTHONPATH it shadows any real installation, so code-graph sync is live
+    on every interpreter instead of silently degrading where codeweaver is
+    absent.  Honoured only by interpreters that read PYTHONPATH (not ``-I``).
+    """
+    package = directory / "codeweaver"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text(_CODEWEAVER_STUB_SOURCE, encoding="utf-8")
+    return directory
+
+
+def interpreter_params() -> list[Any]:
+    """pytest params for the suite interpreter plus python3.10.
+
+    python3.10 comes from ``NEUROLOOM_TEST_PY310`` or ``shutil.which``.  When it
+    is missing the param is still emitted, marked skip, so the gap shows up as a
+    SKIP in the report rather than as a quietly shorter matrix.
+    """
+    import pytest  # noqa: PLC0415 (test-time dependency, kept out of module import)
+
+    override = os.environ.get("NEUROLOOM_TEST_PY310", "")
+    found = override or shutil.which("python3.10") or ""
+    missing = not found or not Path(found).exists()
+    return [
+        pytest.param(sys.executable, id="suite-python"),
+        pytest.param(
+            found or "python3.10",
+            id="py310",
+            marks=pytest.mark.skipif(
+                missing, reason="python3.10 not found (set NEUROLOOM_TEST_PY310 or put it on PATH)"
+            ),
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +1005,7 @@ def run_hook(
     expected_root: Path | None = None,
     control: bool = False,
     timeout: float = 10.0,
+    pythonpath_extra: tuple[Path, ...] = (),
 ) -> HookRun:
     """Run a hook module as a subprocess with an explicit minimal environment.
 
@@ -748,6 +1019,8 @@ def run_hook(
       ``NEUROLOOM_CODEWEAVER_OFFLINE=1`` and runs the hook through a shim that
       no-ops the codeweaver bootstrap and blocks non-loopback ``urlopen``.
       Otherwise the real launcher ``run_hook.py`` is used.
+    * *pythonpath_extra* directories (egress shim, codeweaver stub) are appended
+      to PYTHONPATH; the normal-mode launcher honours it, the ``-I`` CI one does not.
     """
     py = interpreter or sys.executable
     root = plugin_root or PLUGIN_ROOT
@@ -755,6 +1028,9 @@ def run_hook(
     if control:
         extra.setdefault("NEUROLOOM_CODEWEAVER_OFFLINE", "1")
     env = _minimal_env(py, root, scratch, black_hole_url, extra)
+    if pythonpath_extra:
+        # Appended AFTER the plugin root(s), so a decoy can never shadow pyhooks.
+        env["PYTHONPATH"] = os.pathsep.join([env["PYTHONPATH"], *map(str, pythonpath_extra)])
 
     assert_import_origin(py, expected_root or root, env, cwd)
 
