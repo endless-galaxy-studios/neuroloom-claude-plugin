@@ -417,7 +417,9 @@ class TestPreloadRead:
         out, fetch = _run_preload(project, monkeypatch, capsys, _read(target))
 
         fetch.assert_called_once()
-        assert fetch.call_args.args[2] == target
+        # The API gets the path RELATIVE to the project root (it matches symbol paths
+        # stored that way); the absolute `target` never leaves the machine.
+        assert fetch.call_args.args[2] == "src/auth_handler.py"
         assert out == {"additionalContext": "Relevant context"}
         assert _query(project, "SELECT COUNT(*) FROM cache") == [(1,)]
 
@@ -2425,3 +2427,287 @@ class TestUnusableCwdPrefetch:
         )
         assert called.wait(timeout=2)
         prefetch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Round 7: /context gets the file's path RELATIVE to the project root
+# ---------------------------------------------------------------------------
+
+
+class _FakeHttpResponse:
+    """Stands in for the object `urllib.request.urlopen` returns."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeHttpResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+def _run_preload_over_the_wire(
+    project: Project,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    event: dict[str, Any],
+    *,
+    cwd: Path | None = None,
+    process_cwd: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Run preload_context.main() with the REAL `_fetch_context`; only `urlopen` is faked.
+
+    ``cwd`` is the event's `cwd`; the hook process runs in ``process_cwd`` (default: the same).
+    Returns (parsed stdout, the JSON request bodies actually POSTed to /api/v1/context).
+    """
+    cwd = cwd or project.root
+    monkeypatch.chdir(process_cwd or cwd)
+    bodies: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Any, timeout: float | None = None) -> _FakeHttpResponse:
+        assert request.full_url.endswith("/api/v1/context")
+        bodies.append(json.loads(request.data.decode("utf-8")))
+        return _FakeHttpResponse(
+            json.dumps({"injection_text": "CTX", "nudge_text": "NUDGE"}).encode("utf-8")
+        )
+
+    cfg = _config(project)
+    monkeypatch.setattr(_pc_mod._config_mod, "load", lambda: cfg)
+    monkeypatch.setattr(_pc_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({**event, "cwd": str(cwd)})))
+    _pc_mod.main()
+    return json.loads(capsys.readouterr().out), bodies
+
+
+class TestRootRelativePath:
+    """Unit tests of `containment.root_relative_path`."""
+
+    def test_file_at_the_project_root(self, project: Project) -> None:
+        (project.root / "x.py").write_text("")
+        assert _containment.root_relative_path(str(project.root / "x.py"), project.root) == "x.py"
+
+    def test_nested_file(self, project: Project) -> None:
+        nested = project.root / "src" / "a"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / "b.py").write_text("")
+        assert (
+            _containment.root_relative_path(str(nested / "b.py"), project.root) == "src/a/b.py"
+        )
+
+    def test_the_project_root_itself_is_dot(self, project: Project) -> None:
+        assert _containment.root_relative_path(str(project.root), project.root) == "."
+
+    def test_outside_or_unresolvable_is_none(self, project: Project) -> None:
+        for raw in (
+            str(project.other / "secret.py"),
+            "/etc/hosts",
+            str(project.root / ".." / "other" / "secret.py"),
+            str(project.root / "link" / "secret.py"),  # a symlink out
+            "~nosuchuser/x",
+            "bad" + chr(0) + "path",
+        ):
+            assert _containment.root_relative_path(raw, project.root) is None, raw
+
+    def test_dotdot_that_returns_inside_is_normalised(self, project: Project) -> None:
+        raw = str(project.root / "src" / ".." / "src" / "auth_handler.py")
+        assert _containment.root_relative_path(raw, project.root) == "src/auth_handler.py"
+
+    def test_a_symlink_inside_reports_the_real_file_the_code_graph_holds(
+        self, project: Project
+    ) -> None:
+        """codeweaver resolves symlinks before relativising, so the stored path is the target's."""
+        raw = str(project.root / "inner_link" / "auth_handler.py")
+        assert _containment.root_relative_path(raw, project.root) == "src/auth_handler.py"
+
+    def test_a_relative_input_hangs_off_the_base(self, project: Project) -> None:
+        assert (
+            _containment.root_relative_path("auth_handler.py", project.root, project.root / "src")
+            == "src/auth_handler.py"
+        )
+
+    def test_posix_separators_a_backslash_is_an_ordinary_filename_character(
+        self, project: Project
+    ) -> None:
+        """On POSIX `a<backslash>b.py` is ONE file name, so it must not be turned into a
+        path separator.  (On Windows the hook gets `as_posix()` separators instead.)"""
+        name = "a" + chr(92) + "b.py"
+        (project.root / name).write_text("")
+        assert _containment.root_relative_path(str(project.root / name), project.root) == name
+
+    def test_windows_style_separators_come_out_as_slashes_via_as_posix(self) -> None:
+        """The mechanism the hook relies on for Windows (stdlib behaviour, shown on a pure path)."""
+        import pathlib
+
+        relative = pathlib.PureWindowsPath("C:" + chr(92) + "proj" + chr(92) + "src" + chr(92) + "a.py")
+        assert relative.relative_to(pathlib.PureWindowsPath("C:" + chr(92) + "proj")).as_posix() == "src/a.py"
+
+
+class TestPreloadSendsRootRelativePath:
+    def _make(self, project: Project, relative: str) -> Path:
+        target = project.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("")
+        return target
+
+    @pytest.mark.parametrize(
+        ("relative", "expected"),
+        [("x.py", "x.py"), ("src/a/b.py", "src/a/b.py"), ("src/auth_handler.py", "src/auth_handler.py")],
+    )
+    def test_the_request_body_carries_the_relative_path(
+        self,
+        project: Project,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        relative: str,
+        expected: str,
+    ) -> None:
+        target = self._make(project, relative)
+        out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
+
+        assert bodies == [{"file_path": expected, "format": "inject"}]
+        assert out == {"additionalContext": "CTX"}
+
+    def test_the_absolute_project_path_is_nowhere_in_the_request(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = self._make(project, "src/a/b.py")
+        _, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
+        assert str(project.root) not in json.dumps(bodies)
+        assert not Path(bodies[0]["file_path"]).is_absolute()
+
+    def test_a_session_id_is_still_sent_alongside(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = self._make(project, "src/a/b.py")
+        _seed_session(project)
+        _, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
+        assert bodies == [{"file_path": "src/a/b.py", "format": "inject", "session_id": SESSION_ID}]
+
+    def test_a_relative_read_path_resolves_against_the_session_cwd(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The event cwd is src/a but the hook process runs at the project root, so `b.py` is
+        only `src/a/b.py` if it is resolved against the EVENT cwd."""
+        self._make(project, "src/a/b.py")
+        _, bodies = _run_preload_over_the_wire(
+            project,
+            monkeypatch,
+            capsys,
+            _read("b.py"),
+            cwd=project.root / "src" / "a",
+            process_cwd=project.root,
+        )
+        assert bodies == [{"file_path": "src/a/b.py", "format": "inject"}]
+
+    def test_a_symlink_inside_the_project_sends_the_real_file(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _, bodies = _run_preload_over_the_wire(
+            project, monkeypatch, capsys, _read(str(project.root / "inner_link" / "auth_handler.py"))
+        )
+        assert bodies == [{"file_path": "src/auth_handler.py", "format": "inject"}]
+
+    def test_reading_the_project_root_itself_sends_nothing(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """There is no file to look up, and the absolute path is never a fallback."""
+        out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(project.root)))
+        assert out == {} and bodies == []
+        assert ("no_relative_path",) in _query(
+            project, "SELECT decision FROM traces WHERE script = 'preload_context'"
+        )
+
+    def test_without_a_relative_form_nothing_is_sent_never_the_absolute_path(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Containment passed, but the relative form is unavailable (the file moved or a
+        symlink changed in between).  Fail closed: do not fall back to the absolute path."""
+        target = self._make(project, "src/a/b.py")
+        monkeypatch.setattr(_containment, "root_relative_path", lambda *a, **k: None)
+        out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
+        assert out == {} and bodies == []
+        assert ("no_relative_path",) in _query(
+            project, "SELECT decision FROM traces WHERE script = 'preload_context'"
+        )
+
+    def test_nudge_requests_are_unchanged(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Glob/Grep send a `query`, never a `file_path`."""
+        _, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _grep("def auth_handler"))
+        assert bodies == [{"query": "def auth handler", "format": "nudge"}]
+        assert "file_path" not in bodies[0]
+
+    def test_the_cache_key_stays_absolute_and_still_works(
+        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The key is local only.  It must still identify the file, and a repeat read must hit it."""
+        target = self._make(project, "src/a/b.py")
+        _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
+
+        expected_key = _pc_mod._cache_key(str(target), str(project.root))
+        assert _query(project, "SELECT cache_key FROM cache") == [(expected_key,)]
+
+        out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
+        assert bodies == []  # served from the cache: no second request
+        assert out == {"additionalContext": "CTX"}
+
+
+class TestRelativePathMatchesTheCodeGraph:
+    """The reason for the change: the path the hook now sends matches what is stored.
+
+    The stored path comes from the REAL parser (codeweaver.parse_files, which is what
+    code_graph_sync and the seed script run).  The match uses the same SQL the API's
+    `search_symbols` builds -- `file_path LIKE :pattern`, with `*` turned into `%` -- run on
+    SQLite.  SQLite's LIKE is case-insensitive and has no default escape character, unlike
+    PostgreSQL's, so this checks the wildcard rules both share; the PostgreSQL behaviour was
+    verified separately against the real `search_symbols` (see the CHANGELOG).
+    """
+
+    @staticmethod
+    def _match(stored: list[str], pattern: str) -> list[str]:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE TABLE code_symbols (file_path TEXT)")
+            conn.executemany("INSERT INTO code_symbols VALUES (?)", [(p,) for p in stored])
+            # Exactly what CodeGraphService.search_symbols does to the pattern:
+            sql_pattern = pattern.replace("*", "%")
+            rows = conn.execute(
+                "SELECT file_path FROM code_symbols WHERE file_path LIKE ?", (sql_pattern,)
+            ).fetchall()
+            return sorted(row[0] for row in rows)
+        finally:
+            conn.close()
+
+    def test_the_relative_path_matches_what_the_real_parser_stored_and_the_absolute_does_not(
+        self, project: Project
+    ) -> None:
+        codeweaver = pytest.importorskip("codeweaver")
+        source = project.root / "src" / "a" / "b.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("def hello():" + chr(10) + "    return 1" + chr(10))
+
+        payload = codeweaver.parse_files([source], project.root)
+        stored = sorted({symbol["file_path"] for symbol in payload["symbols"]})
+        assert stored == ["src/a/b.py"]  # root-relative, as the real parser stores it
+
+        sent_now = _containment.root_relative_path(str(source), project.root)
+        sent_before = str(source)
+        assert self._match(stored, sent_now or "") == stored
+        assert self._match(stored, sent_before) == []  # the bug: it matched nothing
+
+    def test_a_wildcard_character_in_a_name_only_ever_widens_the_match(
+        self, project: Project
+    ) -> None:
+        """`_` is a single-character LIKE wildcard, so `auth_service.py` also matches a file
+        that differs only at that position.  Over-matching, never under-matching: the
+        file's own row always matches."""
+        stored = ["src/auth_service.py", "src/authXservice.py", "src/other.py"]
+        assert self._match(stored, "src/auth_service.py") == [
+            "src/authXservice.py",
+            "src/auth_service.py",
+        ]
