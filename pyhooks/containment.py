@@ -260,16 +260,49 @@ def within_root(raw_path: str, root: Path, base: str | Path | None = None) -> bo
     ``/Users/x/Proj/a.py`` is *not* recognised as inside ``/Users/x/proj``; a
     case-mismatched spelling is skipped (over-skips, never leaks).
     """
+    resolved = _resolve_target(raw_path, base)
+    return resolved is not None and resolved.is_relative_to(root)
+
+
+def _resolve_target(raw_path: str, base: str | Path | None) -> Path | None:
+    """Resolve a tool-supplied path to its real location, or None if it cannot be.
+
+    The one resolution rule behind ``within_root`` and ``root_relative_path``:
+    ``~`` is expanded (one that stays unexpanded, ``~nosuchuser``/``~+``/``~-``,
+    is unresolvable), a relative path hangs off *base*, and symlinks are followed
+    and ``..`` collapsed.  Any failure (embedded NUL byte, symlink loop on an
+    older Python) is None rather than an exception.
+    """
     try:
         expanded = os.path.expanduser(raw_path)
         if expanded.startswith("~"):
-            return False
+            return None
         candidate = Path(expanded)
         if not candidate.is_absolute() and base is not None:
             candidate = Path(os.path.expanduser(str(base))) / candidate
-        return candidate.resolve().is_relative_to(root)
+        return candidate.resolve()
     except Exception:
-        return False
+        return None
+
+
+def root_relative_path(raw_path: str, root: Path, base: str | Path | None = None) -> str | None:
+    """Return *raw_path* as a POSIX path relative to *root*, or None if not inside it.
+
+    This is the form the Neuroloom API can match.  Its code graph stores each
+    symbol's ``file_path`` relative to the project root (codeweaver stores
+    ``relative_to(workspace_root)``) and ``/context`` looks a file up with
+    ``file_path LIKE :pattern``, so an absolute path never matches.
+
+    The path is resolved by exactly the rule ``within_root`` uses, so a file that
+    passed the containment check always has a relative form, and a symlink inside
+    the project reports the real file it points to -- which is the path the code
+    graph holds.  Separators are POSIX (``as_posix``) on every platform.  The
+    project root itself is ``"."``.
+    """
+    resolved = _resolve_target(raw_path, base)
+    if resolved is None or not resolved.is_relative_to(root):
+        return None
+    return resolved.relative_to(root).as_posix()
 
 
 # ---------------------------------------------------------------------------

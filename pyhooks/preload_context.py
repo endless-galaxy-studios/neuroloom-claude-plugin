@@ -430,7 +430,10 @@ def _fetch_context(
 
     Mode determines the payload:
       inject — sends file_path + format=inject, reads injection_text from
-               response
+               response.  *file_path* is sent exactly as given: the caller
+               passes the path RELATIVE to the project root in POSIX form
+               (``src/a/b.py``), because the API matches it against code-graph
+               symbol paths stored that way and an absolute path never matches.
       nudge  — sends query + format=nudge, reads nudge_text from response
 
     The null payload field (query for inject mode, file_path for nudge mode)
@@ -589,16 +592,28 @@ def main() -> None:
             print(json.dumps({}))
             return
 
-        if _targets_outside_project(
-            tool_name,
-            tool_input,
-            _cmd,
-            project_root,
-            _containment.session_cwd(hook_input),
-        ):
+        event_cwd = _containment.session_cwd(hook_input)
+        if _targets_outside_project(tool_name, tool_input, _cmd, project_root, event_cwd):
             _trace_mod.write(conn, "preload_context", "outside_project")
             print(json.dumps({}))
             return
+
+        # What is sent to the API for a Read is the file's path RELATIVE to the
+        # project root, in POSIX form.  The API's code-graph branch looks the file
+        # up with `file_path LIKE :pattern` against symbol paths stored relative to
+        # the root, so the absolute path used to match nothing.  `file_path` itself
+        # stays absolute: it is only the local cache key and is never transmitted.
+        # Containment above already proved the target is inside the root, so a
+        # missing relative form (or the root itself) means there is no file to
+        # look up -- skip rather than fall back to the absolute path.
+        api_file_path = file_path
+        if mode == "inject":
+            relative = _containment.root_relative_path(file_path, project_root, event_cwd)
+            if relative is None or relative == ".":
+                _trace_mod.write(conn, "preload_context", "no_relative_path")
+                print(json.dumps({}))
+                return
+            api_file_path = relative
 
         # --------------------------------------------------------------
         # Session ID — look up from sessions table by workspace key.
@@ -648,7 +663,12 @@ def main() -> None:
             return
 
         # --------------------------------------------------------------
-        # Compute cache key
+        # Compute cache key.  The inject key stays on the ABSOLUTE path: it is
+        # local only (never transmitted), and an absolute path identifies one
+        # file unambiguously whichever directory the session started in.  The
+        # token-budget key (`session_id or workspace_root`) has nothing to do
+        # with the file path at all.  Where these keys should live is D178d's
+        # decision.
         # --------------------------------------------------------------
         if mode == "inject":
             cache_key = _cache_key(file_path, workspace_root)
@@ -685,7 +705,7 @@ def main() -> None:
                 result = _fetch_context(
                     cfg.api_base,
                     cfg.api_key,
-                    file_path,
+                    api_file_path,
                     fmt=mode,
                     query=extracted_query if mode == "nudge" else None,
                     session_id=session_id,
