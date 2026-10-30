@@ -24,12 +24,11 @@ file outside the project would upload that file's content (a Read's
 Edit, NotebookEdit, Glob and Grep whose target is outside the project root are
 therefore dropped entirely -- not sent and not buffered (step 8b).
 
-The project root is ``CLAUDE_PROJECT_DIR``, and it must be the directory the
-API key was read from (step 3b): after a ``cd`` into a sibling or nested project
-with its own ``.neuroloom.db``, this project's events would otherwise be
-uploaded with THAT project's key.  With ``CLAUDE_PROJECT_DIR`` unset the root
-falls back to the process cwd, which follows ``cd`` -- weaker, and traced as
-``project_root_fallback_cwd``.
+The project root is ``CLAUDE_PROJECT_DIR``, and the API key, session row and
+state database are all read from it (step 3b), so a ``cd`` into a sibling or
+nested project cannot send this project's events under another project's key.
+With ``CLAUDE_PROJECT_DIR`` unset the root falls back to the process cwd,
+which follows ``cd`` -- weaker, and traced as ``project_root_fallback_cwd``.
 
 NOT contained, stated plainly:
 
@@ -46,7 +45,6 @@ See ``pyhooks.containment``.
 """
 
 import json
-import os
 import re
 import sqlite3
 import sys
@@ -64,7 +62,7 @@ from pyhooks.http import post_json
 
 _SCRIPT = "pyhooks.capture"
 
-# Workspace key is the canonical absolute path of the current working directory.
+# The session key is str(containment.project_root()), stable across `cd`.
 _SESSION_ID_RE = re.compile(r"^sess-[0-9]+-[a-f0-9]+$")
 _MCP_TOOL_RE = re.compile(r"^mcp__neuroloom__")
 
@@ -244,21 +242,15 @@ def main() -> None:
     session_id: str | None = None
 
     try:
-        workspace_key = str(Path(os.getcwd()).resolve())
-
         # -------------------------------------------------------------- 3b
-        # The project root must be the directory the API key was read from.
-        # After a `cd` into a sibling or nested project with its own
-        # .neuroloom.db, this project's events would otherwise be uploaded with
-        # THAT project's key to ITS workspace -- fail closed.  Also trace when
+        # The project root keys the session row and is where the API key was
+        # read from (config.load() uses the same resolver).  Trace when
         # CLAUDE_PROJECT_DIR is unset and the root fell back to the process cwd
         # (weaker: that cwd follows `cd`).  See pyhooks/containment.py.
         project_root = containment.project_root()
+        workspace_key = str(project_root)
         if containment.project_root_is_fallback():
             trace.write(conn, _SCRIPT, "project_root_fallback_cwd")
-        if not containment.credential_matches_root(config.state_db_path, project_root):
-            trace.write(conn, _SCRIPT, "credential_root_mismatch")
-            sys.exit(0)
 
         # -------------------------------------------------------------- 4
         row = conn.execute(
@@ -322,7 +314,7 @@ def main() -> None:
         # Placed before the rate-limit bookkeeping so a dropped event neither
         # consumes the throttle window nor is buffered for replay.  The root is
         # CLAUDE_PROJECT_DIR and relative targets resolve against the event's
-        # own `cwd` -- not workspace_key, the process cwd, which follows `cd`.
+        # own `cwd` (session_cwd) -- not the project root.
         _raw_tool_input = data.get("tool_input")
         if containment.tool_targets_outside_root(
             tool_name,

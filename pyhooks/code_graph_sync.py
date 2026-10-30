@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 import sys
 import threading
@@ -47,16 +46,18 @@ _ALLOWED_EXTENSIONS = {".ts", ".tsx", ".mts", ".py"}
 # ---------------------------------------------------------------------------
 
 
-def _within_workspace(file_path: str, workspace_root: Path) -> bool:
+def _within_workspace(
+    file_path: str, workspace_root: Path, base: str | Path
+) -> bool:
     """Return True only if *file_path* resolves to a path inside *workspace_root*.
 
     Delegates to the shared rule in ``pyhooks.containment`` so there is one
-    definition of "inside".  *workspace_root* stays the process cwd here (not
-    ``CLAUDE_PROJECT_DIR``): codeweaver computes each stored symbol path as
-    ``relative_to(workspace_root)`` against this same directory, so it must be
-    the directory the stored paths are relative to.
+    definition of "inside".  *workspace_root* is the project root
+    (``containment.project_root()``), the directory codeweaver's stored symbol
+    paths are relative to (it computes ``relative_to(workspace_root)``).  A
+    relative *file_path* is read against *base*, the event's session cwd.
     """
-    return _containment.within_root(file_path, workspace_root)
+    return _containment.within_root(file_path, workspace_root, base)
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +242,13 @@ def main() -> None:
         event = json.loads(raw)
         tool_input: dict[str, Any] = event.get("tool_input", {})
         file_path_str: str = str(tool_input.get("file_path", ""))
+        # Where Claude is now: a relative file_path is read against this, not
+        # against the hook process's directory.  None = malformed event cwd.
+        event_cwd = _containment.session_cwd(event)
     except Exception:
+        sys.exit(0)
+
+    if event_cwd is None:
         sys.exit(0)
 
     if not file_path_str:
@@ -254,9 +261,15 @@ def main() -> None:
         sys.exit(0)
 
     # 5. Workspace containment
-    workspace_root = Path(os.getcwd()).resolve()
-    if not _within_workspace(file_path_str, workspace_root):
+    workspace_root = _containment.project_root()
+    if not _within_workspace(file_path_str, workspace_root, event_cwd):
         sys.exit(0)
+    relative = _containment.root_relative_path(file_path_str, workspace_root, event_cwd)
+    if relative is None:
+        sys.exit(0)
+    # The resolved absolute path queued for the sync (same form as before for
+    # an absolute file_path; a relative one now hangs off the event's cwd).
+    queued_path = str(workspace_root / relative)
 
     # 6. Open DB
     conn = _db.open_db(config.state_db_path)
@@ -276,7 +289,7 @@ def main() -> None:
         )
         conn.execute(
             "INSERT OR IGNORE INTO debounce_files (workspace_key, file_path) VALUES (?, ?)",
-            (workspace_key, str(Path(file_path_str).resolve())),
+            (workspace_key, queued_path),
         )
         conn.commit()
 

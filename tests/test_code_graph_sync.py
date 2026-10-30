@@ -123,26 +123,26 @@ class TestWorkspaceContainment:
         workspace.mkdir()
         # A path that escapes via ``../``
         outside = "../outside/file.py"
-        assert not _cgs_mod._within_workspace(outside, workspace.resolve())
+        assert not _cgs_mod._within_workspace(outside, workspace.resolve(), workspace.resolve())
 
     def test_prefix_bypass_rejected(self, tmp_path: Path) -> None:
         """``/project-evil/file.py`` must not match workspace ``/project``."""
         workspace = tmp_path / "project"
         workspace.mkdir()
         evil = tmp_path / "project-evil" / "file.py"
-        assert not _cgs_mod._within_workspace(str(evil), workspace.resolve())
+        assert not _cgs_mod._within_workspace(str(evil), workspace.resolve(), workspace.resolve())
 
     def test_file_inside_workspace_accepted(self, tmp_path: Path) -> None:
         workspace = tmp_path / "project"
         workspace.mkdir()
         inside = workspace / "src" / "main.py"
-        assert _cgs_mod._within_workspace(str(inside), workspace.resolve())
+        assert _cgs_mod._within_workspace(str(inside), workspace.resolve(), workspace.resolve())
 
     def test_absolute_path_outside_workspace_rejected(self, tmp_path: Path) -> None:
         workspace = tmp_path / "project"
         workspace.mkdir()
         outside = tmp_path / "other_project" / "file.py"
-        assert not _cgs_mod._within_workspace(str(outside), workspace.resolve())
+        assert not _cgs_mod._within_workspace(str(outside), workspace.resolve(), workspace.resolve())
 
 
 class TestDebounce:

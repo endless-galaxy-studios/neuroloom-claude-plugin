@@ -61,6 +61,7 @@ import urllib.request
 from pathlib import Path
 
 import pyhooks.config as _config
+import pyhooks.containment as _containment
 import pyhooks.db as _db
 import pyhooks.http as _http
 import pyhooks.trace as _trace
@@ -315,13 +316,14 @@ def _auth_headers(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Token {api_key}"}
 
 
-def _git_branch() -> str:
-    """Return the current git branch name, or 'unknown' on any failure."""
+def _git_branch(cwd: str) -> str:
+    """Return the branch checked out in *cwd* (the project root), or 'unknown' on any failure."""
     try:
         result = subprocess.run(
             ["git", "branch", "--show-current"],
             capture_output=True,
             text=True,
+            cwd=cwd,
         )
         branch = result.stdout.strip()
         return branch if branch else "unknown"
@@ -546,7 +548,7 @@ def _start_new_session(
     api_base: str,
     api_key: str,
     workspace_key: str,
-    cwd: str,
+    root: str,
 ) -> str | None:
     """
     Step 5 — register a new session with the Neuroloom API.
@@ -556,8 +558,8 @@ def _start_new_session(
     reference it.
     """
     sid = f"sess-{int(time.time())}-{secrets.token_hex(4)}"
-    branch = _git_branch()
-    project_name = Path(cwd).name
+    branch = _git_branch(root)
+    project_name = Path(root).name
 
     payload = json.dumps(
         {
@@ -886,8 +888,8 @@ def main() -> None:
     conn = _db.open_db(cfg.state_db_path)
 
     try:
-        cwd = str(Path(os.getcwd()).resolve())
-        workspace_key = cwd
+        root = str(_containment.project_root())
+        workspace_key = root
 
         # Step 2a — gitignore management (non-fatal). The only pre-guard
         # relocation that survives round 9 -- round 8's further relocation of
@@ -896,7 +898,7 @@ def main() -> None:
         # reverted (round 9, CRITICAL-1). See the disposition table in D171's
         # plan.
         try:
-            _ensure_gitignore(cwd)
+            _ensure_gitignore(root)
         except Exception:
             pass  # non-fatal: D171 round 7 (infosec MAJOR-15) — a write
                   # failure here must never suppress the dormant-capture
@@ -919,7 +921,7 @@ def main() -> None:
         # Step 5 — start new session.
         session_id: str | None = None
         if conn is not None:
-            session_id = _start_new_session(conn, cfg.api_base, cfg.api_key, workspace_key, cwd)
+            session_id = _start_new_session(conn, cfg.api_base, cfg.api_key, workspace_key, root)
 
         # Step 6 — prune traces.
         if conn is not None:
@@ -976,7 +978,7 @@ def main() -> None:
         # already correct — so it surfaces the distinct
         # _STAMP_OWNERSHIP_ONLY_MESSAGE instead (D176 #4).
         gated_outcome = _workspace_config.gated_reconcile(
-            cwd, cfg.state_db_path, cfg.api_base, cfg.api_key
+            root, cfg.state_db_path, cfg.api_base, cfg.api_key
         )
         reconcile_outcome = gated_outcome.reconcile
 
@@ -1037,7 +1039,7 @@ def main() -> None:
             # silent.
 
         # Step 9 — CLAUDE.md injection.
-        _inject_claudemd(cwd)
+        _inject_claudemd(root)
 
         # Step 10 — bootstrap/upgrade codeweaver (background thread with short join).
         updater = threading.Thread(

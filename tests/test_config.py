@@ -5,7 +5,7 @@ Verifies that ``load()`` reads configuration correctly (D171 / ADR-17: the
 per-project ``.neuroloom.db`` row is the ONLY source of ``api_key`` --
 ``CLAUDE_PLUGIN_OPTION_API_KEY`` and ``NEUROLOOM_API_KEY`` are both dropped
 from live routing), applies safe defaults when nothing is configured,
-constructs ``state_db_path`` from the current working directory, and never
+constructs ``state_db_path`` from the project root (D178d), and never
 exposes the API key value in repr/str. Also covers ``load_project_api_key()``
 and ``load_global_seed_key()`` (the seed-only reader), plus the three-surface
 credential-isolation regression scan (D171 round 6 F-B, round 7 file-axis
@@ -128,10 +128,8 @@ class TestConfigLoad:
         round 7 -- rewritten the same way as
         test_load_returns_config_with_all_fields).
 
-        Note: ``Config`` is a plain frozen dataclass -- ``repr()`` includes all
-        fields including ``api_key``.  Masking would require a custom ``__repr__``.
-        This test verifies the field is populated correctly; if masking is added
-        in the future this test should be updated accordingly.
+        Note: ``api_key`` is declared ``field(repr=False)`` (D178d), so ``repr()``
+        never includes it; this test only verifies the field is populated.
         """
         monkeypatch.chdir(tmp_path)
         sentinel = "super-secret-token-xyz"
@@ -678,3 +676,247 @@ def test_multi_statement_evasion_is_an_accepted_residual(tmp_path: Path) -> None
         "the multi-statement evasion shape was unexpectedly caught -- "
         "either the scan changed, or this test's fixture needs updating"
     )
+
+
+# ---------------------------------------------------------------------------
+# D178d Phase 2: mode switch, Config additions, load() reporting, save_project_api_key
+#
+# New names (parse_mode, ModeParse, save_project_api_key) are imported INSIDE the
+# test bodies so a missing name is a red test, not a collection error.  Every
+# assertion message is distinct so `-rf` lines are unambiguous.
+# ---------------------------------------------------------------------------
+
+# Spec §6.2 "Shared mode-parse table" (d178d_base_plugin_ci_mode_spec.md), copied
+# verbatim: the eleven NEUROLOOM_MODE inputs.  (raw, ci, message) where "message"
+# is whether the one unrecognised-mode stderr line is printed -- i.e. NOT recognised.
+_MODE_TABLE_SPEC_6_2: list[tuple[str | None, bool, bool]] = [
+    (None, False, False),        # unset
+    ("", False, False),          # ""
+    ("   ", False, False),       # "   "
+    ("ci", True, False),         # ci
+    ("CI", True, False),         # CI
+    (" ci ", True, False),       # " ci "
+    ("prod", True, True),        # prod
+    ("ci2", True, True),         # ci2
+    ("cii", True, True),         # cii
+    ("off", True, True),         # off
+    ("false", True, True),       # false
+]
+
+
+class TestParseMode:
+    def test_the_table_has_the_eleven_inputs_of_spec_6_2(self) -> None:
+        assert len(_MODE_TABLE_SPEC_6_2) == 11, "mode-table: spec §6.2 lists eleven inputs"
+
+    @pytest.mark.parametrize(("raw", "ci", "message"), _MODE_TABLE_SPEC_6_2, ids=repr)
+    def test_parse_mode_matches_spec_6_2(self, raw: str | None, ci: bool, message: bool) -> None:
+        from pyhooks.config import parse_mode  # new name: imported inside the body
+
+        result = parse_mode(raw)
+        assert result.ci is ci, f"parse-mode/ci: wrong CI flag for NEUROLOOM_MODE={raw!r}"
+        assert result.recognised is (not message), (
+            f"parse-mode/recognised: wrong message decision for NEUROLOOM_MODE={raw!r}"
+        )
+
+    def test_config_built_without_ci_mode_defaults_to_false(self, tmp_path: Path) -> None:
+        cfg = _config_mod.Config(api_key="k", api_base="http://x", state_db_path=tmp_path / ".neuroloom.db")
+        assert getattr(cfg, "ci_mode", "absent") is False, "config-default: Config.ci_mode must default to False"
+
+    def test_load_sets_ci_mode_from_the_environment_on_every_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NEUROLOOM_MODE", "ci")
+        assert getattr(_config_mod.load(), "ci_mode", None) is True, "load-ci-mode: NEUROLOOM_MODE=ci must set ci_mode"
+        monkeypatch.setenv("NEUROLOOM_MODE", "prod")
+        assert getattr(_config_mod.load(), "ci_mode", None) is True, (
+            "load-ci-mode: an unrecognised non-empty mode also means CI"
+        )
+        monkeypatch.setenv("NEUROLOOM_MODE", "  ")
+        assert getattr(_config_mod.load(), "ci_mode", None) is False, (
+            "load-ci-mode: a blank mode is normal and the flag is re-read on every call"
+        )
+        monkeypatch.delenv("NEUROLOOM_MODE")
+        assert getattr(_config_mod.load(), "ci_mode", None) is False, "load-ci-mode: unset is normal"
+
+    def test_repr_and_str_of_config_do_not_contain_the_key(self, tmp_path: Path) -> None:
+        cfg = _config_mod.Config(
+            api_key="repr-leak-sentinel-key", api_base="http://x", state_db_path=tmp_path / ".neuroloom.db"
+        )
+        assert "repr-leak-sentinel-key" not in repr(cfg), "repr-hides-key: repr(Config) leaked the API key"
+        assert "repr-leak-sentinel-key" not in str(cfg), "repr-hides-key: str(Config) leaked the API key"
+
+
+def _snapshot(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir())
+
+
+class TestLoadReporting:
+    """A project with no usable key is dormant: source none, empty key, nothing created, nothing logged."""
+
+    @pytest.fixture()
+    def at_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = tmp_path.resolve()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
+        monkeypatch.chdir(root)
+        return root
+
+    def test_missing_file_reports_none_and_creates_nothing(
+        self, at_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        before = _snapshot(at_root)
+        with caplog.at_level("DEBUG"):
+            cfg = _config_mod.load()
+        assert (cfg.api_key_source, cfg.api_key) == ("none", ""), "load-missing: a missing database must report none"
+        assert _snapshot(at_root) == before, "load-missing: load() must not create any file"
+        assert [r for r in caplog.records if r.levelno >= 30] == [], "load-missing: no WARNING record expected"
+
+    def test_directory_at_the_database_path_reports_none_quietly(
+        self, at_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (at_root / ".neuroloom.db").mkdir()
+        before = _snapshot(at_root)
+        with caplog.at_level("DEBUG"):
+            cfg = _config_mod.load()
+        assert (cfg.api_key_source, cfg.api_key) == ("none", ""), "load-directory: a directory must report none"
+        assert _snapshot(at_root) == before, "load-directory: load() must not create any file"
+        assert (at_root / ".neuroloom.db").is_dir(), "load-directory: the directory must be left alone"
+        assert [r for r in caplog.records if r.levelno >= 30] == [], "load-directory: no WARNING record expected"
+
+    def test_corrupt_file_reports_none_quietly_and_leaves_it_untouched(
+        self, at_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        db = at_root / ".neuroloom.db"
+        db.write_bytes(b"this is not a sqlite database at all")
+        before_bytes, before = db.read_bytes(), _snapshot(at_root)
+        with caplog.at_level("DEBUG"):
+            cfg = _config_mod.load()
+        assert (cfg.api_key_source, cfg.api_key) == ("none", ""), "load-corrupt: a corrupt file must report none"
+        assert db.read_bytes() == before_bytes, "load-corrupt: the corrupt file must not be modified"
+        assert _snapshot(at_root) == before, "load-corrupt: no sidecar or other file may appear"
+        assert [r for r in caplog.records if r.levelno >= 30] == [], "load-corrupt: no WARNING record expected"
+
+    def test_corrupt_file_prints_nothing_on_stderr_in_a_child_process(self, at_root: Path) -> None:
+        """No logging handler is configured in a hook, so a warning would reach stderr via the last-resort handler."""
+        import subprocess
+        import sys
+
+        (at_root / ".neuroloom.db").write_bytes(b"this is not a sqlite database at all")
+        plugin_root = Path(__file__).resolve().parent.parent
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(at_root),
+            "PYTHONPATH": str(plugin_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "CLAUDE_PROJECT_DIR": str(at_root),
+        }
+        from tests import ci_support
+
+        # The editable install maps pyhooks to the MAIN checkout; prove this child imports the worktree's.
+        ci_support.assert_import_origin(sys.executable, plugin_root, env, at_root)
+        done = subprocess.run(
+            [sys.executable, "-c", "import pyhooks.config as c; c.load()"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(at_root),
+            timeout=30,
+            check=False,
+        )
+        assert done.returncode == 0, "load-stderr: the child process must exit cleanly"
+        assert done.stderr == "", "load-stderr: load() printed to stderr for a corrupt database"
+
+    def test_deleted_current_directory_gives_a_dormant_config_not_an_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        cfg = _config_mod.load()
+        assert (cfg.api_key_source, cfg.api_key) == ("none", ""), "load-deleted-cwd: must return a dormant config"
+        import pyhooks.db as _db
+
+        assert _db.open_db(cfg.state_db_path) is None, (
+            "load-deleted-cwd: the dormant state path must be one that can never be opened"
+        )
+        assert not cfg.state_db_path.exists(), "load-deleted-cwd: the dormant state path must not exist afterwards"
+
+    def test_readable_key_reports_project(self, at_root: Path) -> None:
+        _seed_neuroloom_db(at_root / ".neuroloom.db", api_key="readable-key")
+        cfg = _config_mod.load()
+        assert (cfg.api_key_source, cfg.api_key) == ("project", "readable-key"), (
+            "load-readable: a readable key must report project"
+        )
+
+    def test_readable_key_is_found_at_the_root_after_cd_into_a_subdirectory(
+        self, at_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_neuroloom_db(at_root / ".neuroloom.db", api_key="root-held-key")
+        sub = at_root / "sub"
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        cfg = _config_mod.load()
+        assert cfg.api_key == "root-held-key", "load-root-pin: the key must come from the root database after cd sub"
+        assert cfg.state_db_path == at_root / ".neuroloom.db", (
+            "load-root-pin: state_db_path must be the root database, not the cwd's"
+        )
+
+
+class TestSaveProjectApiKey:
+    def test_key_written_to_an_empty_directory_is_read_back(self, tmp_path: Path) -> None:
+        from pyhooks.config import save_project_api_key  # new name: imported inside the body
+
+        target = tmp_path / "empty"
+        target.mkdir()
+        save_project_api_key(target, "first-key")
+        assert _config_mod.load_project_api_key(target) == "first-key", (
+            "save-key: a key written into an empty directory must be read back"
+        )
+
+    def test_a_second_write_replaces_the_key(self, tmp_path: Path) -> None:
+        from pyhooks.config import save_project_api_key  # new name: imported inside the body
+
+        target = tmp_path / "empty"
+        target.mkdir()
+        save_project_api_key(target, "first-key")
+        save_project_api_key(target, "second-key")
+        assert _config_mod.load_project_api_key(target) == "second-key", (
+            "save-key-replace: a second write must replace the first key"
+        )
+        conn = sqlite3.connect(target / ".neuroloom.db")
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM config WHERE key = 'api_key'").fetchone()
+        finally:
+            conn.close()
+        assert rows == (1,), "save-key-replace: exactly one api_key row must remain"
+
+    def test_a_missing_target_directory_is_swallowed_and_nothing_is_created(self, tmp_path: Path) -> None:
+        from pyhooks.config import save_project_api_key  # new name: imported inside the body
+
+        missing = tmp_path / "does-not-exist"
+        result = save_project_api_key(missing, "lost-key")
+        assert result is None, "save-key-missing-dir: the call must return None, not report success or failure"
+        assert not missing.exists(), "save-key-missing-dir: the missing directory must not be created"
+        assert list(tmp_path.iterdir()) == [], "save-key-missing-dir: nothing at all may appear beside it"
+
+    def test_a_failing_write_is_swallowed_and_the_connection_is_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """open_db hands back a database with no config table: the INSERT raises inside the function."""
+        from pyhooks.config import save_project_api_key  # new name: imported inside the body
+
+        opened: list[sqlite3.Connection] = []
+
+        def _bare_open_db(_path: Path) -> sqlite3.Connection:
+            conn = sqlite3.connect(tmp_path / "bare.db")
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(_config_mod, "open_db", _bare_open_db)
+        assert save_project_api_key(tmp_path, "k") is None, (
+            "save-key-insert-fails: the call must return None when the INSERT raises"
+        )
+        assert len(opened) == 1, "save-key-insert-fails: open_db must have been used exactly once"
+        with pytest.raises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")  # a closed connection refuses all use

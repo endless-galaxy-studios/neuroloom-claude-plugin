@@ -2,10 +2,14 @@
 Project-root path containment for neuroloom hook modules.
 
 Hooks that forward a file path, search target, or tool event to the Neuroloom
-API (``preload_context``, ``cache_prefetch``, ``capture``) must first prove the
+API (``preload_context``, ``cache_prefetch``, ``capture``, ``code_graph_sync``) must first prove the
 target lies inside the project root.  A path outside it -- ``~/.ssh/config``,
 ``/etc/hosts``, a sibling repository -- would otherwise be sent to this
 project's shared workspace and pull back (or upload) unrelated content.
+
+``project_root()`` is also the only place that decides where ``.neuroloom.db``
+lives and which API key a hook uses, so state and credential follow the root,
+never the directory Claude happens to be in.
 
 Which directory is "the project root", and which is "where Claude is"
 ----------------------------------------------------------------------
@@ -29,18 +33,6 @@ Two different directories matter, and they diverge after a ``cd``:
   existing directory (a symlink loop, a NUL byte, a missing path) makes
   ``session_cwd`` return None; every check treats that as outside and the hook
   skips.
-
-The root must also be the directory the API key came from
-----------------------------------------------------------
-``.neuroloom.db`` (the API key, session rows, cache keys) is still read from the
-hook process's cwd, which follows ``cd`` -- where it lives is a separate
-decision this module does not make.  But a root and a key that disagree are
-dangerous: after a ``cd`` into a sibling repo that has its own ``.neuroloom.db``,
-a file read in the ORIGINAL project would be sent with the SIBLING's key to the
-sibling's workspace.  Every sending hook therefore skips unless
-``credential_matches_root`` says the directory holding ``.neuroloom.db`` IS the
-project root.  (This also skips a ``cd`` into a nested project that has its own
-key; that is deliberate -- fail closed.)
 
 How paths are judged
 --------------------
@@ -162,7 +154,7 @@ _FILE_TOOLS = frozenset({"Read", "Write", "Edit", "NotebookEdit"})
 
 
 # ---------------------------------------------------------------------------
-# Root, session cwd, and the credential directory
+# Root and session cwd
 # ---------------------------------------------------------------------------
 
 
@@ -209,19 +201,6 @@ def session_cwd(event: Mapping[str, object]) -> Path | None:
         return resolved if resolved.is_dir() else None
     except (OSError, RuntimeError, ValueError):
         return None
-
-
-def credential_matches_root(state_db_path: Path, root: Path) -> bool:
-    """True only if the directory holding ``.neuroloom.db`` IS the project *root*.
-
-    The API key is read from that directory.  A key from anywhere else would
-    send this project's paths and content to a different project's workspace
-    (see the module docs).  Fails closed on an unresolvable path.
-    """
-    try:
-        return state_db_path.parent.resolve() == root
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------

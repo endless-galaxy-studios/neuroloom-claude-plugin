@@ -38,7 +38,6 @@ without having to ask for it.
 
 import hashlib
 import json
-import os
 import random
 import re
 import shlex
@@ -554,8 +553,10 @@ def main() -> None:
         else:
             query_pattern = ""
 
-        # Workspace root is the process working directory (resolved)
-        workspace_root = str(Path(os.getcwd()).resolve())
+        # Workspace root is the project root (stable across `cd`); it keys the
+        # session lookup and the cache.
+        project_root = _containment.project_root()
+        workspace_root = str(project_root)
 
         # --------------------------------------------------------------
         # Guard: required inputs and API key must be present
@@ -574,23 +575,13 @@ def main() -> None:
         # workspace -- no API call, no cache entry.  Resolution follows
         # symlinks and collapses `..` first.  The root is CLAUDE_PROJECT_DIR
         # (stable across `cd`) and relative targets resolve against the
-        # session cwd from the hook event -- NOT `workspace_root` above, which
-        # is the hook process's cwd and follows `cd`.  See pyhooks/containment.py.
+        # session cwd from the hook event, which follows `cd`.  See
+        # pyhooks/containment.py.
         # --------------------------------------------------------------
-        project_root = _containment.project_root()
         if _containment.project_root_is_fallback():
             # CLAUDE_PROJECT_DIR unset: the root is the process cwd, which
             # follows `cd`, so containment is only as strong as that cwd.
             _trace_mod.write(conn, "preload_context", "project_root_fallback_cwd")
-
-        # The API key was read from the process cwd's .neuroloom.db.  If that
-        # is not the project root (a `cd` into a sibling or nested project with
-        # its own key), sending this project's paths with that key would hit
-        # the wrong workspace -- fail closed.
-        if not _containment.credential_matches_root(cfg.state_db_path, project_root):
-            _trace_mod.write(conn, "preload_context", "credential_root_mismatch")
-            print(json.dumps({}))
-            return
 
         event_cwd = _containment.session_cwd(hook_input)
         if _targets_outside_project(tool_name, tool_input, _cmd, project_root, event_cwd):
@@ -602,7 +593,7 @@ def main() -> None:
         # project root, in POSIX form.  The API's code-graph branch looks the file
         # up with `file_path LIKE :pattern` against symbol paths stored relative to
         # the root, so the absolute path used to match nothing.  `file_path` itself
-        # stays absolute: it is only the local cache key and is never transmitted.
+        # is never transmitted; this relative form also keys the local cache.
         # Containment above already proved the target is inside the root, so a
         # missing relative form (or the root itself) means there is no file to
         # look up -- skip rather than fall back to the absolute path.
@@ -663,15 +654,15 @@ def main() -> None:
             return
 
         # --------------------------------------------------------------
-        # Compute cache key.  The inject key stays on the ABSOLUTE path: it is
-        # local only (never transmitted), and an absolute path identifies one
-        # file unambiguously whichever directory the session started in.  The
+        # Compute cache key.  The inject key is the root-relative target the
+        # request itself carries (`api_file_path`), so one relative name read
+        # from two directories gets two entries, and the same file read via an
+        # absolute or a relative path shares one.  It is local only.  The
         # token-budget key (`session_id or workspace_root`) has nothing to do
-        # with the file path at all.  Where these keys should live is D178d's
-        # decision.
+        # with the file path at all.
         # --------------------------------------------------------------
         if mode == "inject":
-            cache_key = _cache_key(file_path, workspace_root)
+            cache_key = _cache_key(api_file_path, workspace_root)
         else:
             # extracted_query is non-None here — guarded by the early return above.
             # Use an explicit None check for type narrowing instead of assert, so

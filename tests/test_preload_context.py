@@ -284,7 +284,8 @@ class TestCacheHit:
 
         workspace_root = str(tmp_path.resolve())
         file_path = _in_root("api.py")
-        cache_key = _pc_mod._cache_key(file_path, workspace_root)
+        # The inject cache is keyed on the root-relative target (D178d).
+        cache_key = _pc_mod._cache_key("api.py", workspace_root)
 
         # Pre-seed the cache
         conn.execute(
@@ -339,7 +340,7 @@ class TestCacheTtl:
 
         workspace_root = str(tmp_path.resolve())
         file_path = _in_root("old.py")
-        cache_key = _pc_mod._cache_key(file_path, workspace_root)
+        cache_key = _pc_mod._cache_key("old.py", workspace_root)
 
         # Seed a cache entry that is more than 3600 seconds old
         expired_ts = time.time() - 4000

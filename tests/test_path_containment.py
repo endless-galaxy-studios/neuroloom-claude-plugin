@@ -103,9 +103,9 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
 def _config(project: Project, db_at: Path | None = None) -> _config_mod.Config:
     """A Config whose key "came from" ``db_at`` (default: the project root's db).
 
-    ``config.load()`` reads the key from ``<process cwd>/.neuroloom.db``, and the
-    process cwd follows ``cd``.  Pass ``db_at=<sibling>/.neuroloom.db`` to model a
-    key that belongs to a DIFFERENT directory than CLAUDE_PROJECT_DIR.
+    ``config.load()`` reads the key from ``<project root>/.neuroloom.db`` (the root
+    is CLAUDE_PROJECT_DIR, which does not follow ``cd``).  Pass ``db_at`` to build a
+    Config whose database path is somewhere else.
     """
     return _config_mod.Config(
         api_key="test-key",
@@ -125,13 +125,13 @@ def _query(project: Project, sql: str, db_at: Path | None = None) -> list[tuple[
 def _seed_session(
     project: Project, session_id: str = SESSION_ID, db_at: Path | None = None
 ) -> None:
-    """Insert a sessions row keyed by the hook process's (resolved) cwd."""
+    """Insert a sessions row keyed by the project root (what the hooks look up)."""
     conn = _db_mod.open_db(db_at or project.db_path)
     assert conn is not None
     conn.execute(
         "INSERT INTO sessions (session_key, session_id, started_at, last_submit_ms) "
         "VALUES (?, ?, datetime('now'), 0)",
-        (str(Path(os.getcwd()).resolve()), session_id),
+        (str(project.root), session_id),
     )
     conn.commit()
     conn.close()
@@ -1347,8 +1347,8 @@ class TestCodeGraphSyncDelegation:
     ) -> None:
         within = MagicMock(return_value=True)
         monkeypatch.setattr(_containment, "within_root", within)
-        assert _cgs_mod._within_workspace("/some/file.py", project.root) is True
-        within.assert_called_once_with("/some/file.py", project.root)
+        assert _cgs_mod._within_workspace("/some/file.py", project.root, project.root) is True
+        within.assert_called_once_with("/some/file.py", project.root, project.root)
 
     @pytest.mark.parametrize(
         "name",
@@ -1365,61 +1365,28 @@ class TestCodeGraphSyncDelegation:
             "inner_symlink": str(project.root / "inner_link" / "auth_handler.py"),
             "prefix_sibling": str(evil / "x.py"),
         }[name]
-        assert _cgs_mod._within_workspace(raw, project.root) == within_root(raw, project.root)
-        assert _cgs_mod._within_workspace(raw, project.root) == (
+        assert _cgs_mod._within_workspace(raw, project.root, project.root) == within_root(raw, project.root)
+        assert _cgs_mod._within_workspace(raw, project.root, project.root) == (
             name in {"inside", "inner_symlink"}
         )
 
 
 # ---------------------------------------------------------------------------
-# Round 3, item 1: the project root and the API key's directory must agree
+# Round 3, item 1 (controls only): the project's own key still sends
 # ---------------------------------------------------------------------------
 
 
-class TestCredentialMatchesRoot:
-    """`config.load()` reads the key from `<process cwd>/.neuroloom.db`, and the
-    process cwd follows `cd`.  After a `cd` into a sibling or nested project that
-    has its OWN key, reading a file in the original project would send it with
-    THAT key to THAT workspace.  Every sending hook must skip."""
+class TestOwnKeyStillSends:
+    """Controls kept from D178e's credential-root tests (removed in D178d, SC-1).
 
-    def test_unit_same_directory_matches(self, project: Project) -> None:
-        assert _containment.credential_matches_root(project.root / ".neuroloom.db", project.root)
-
-    def test_unit_sibling_nested_and_missing_do_not_match(self, project: Project) -> None:
-        for db in (
-            project.other / ".neuroloom.db",
-            project.root / "src" / ".neuroloom.db",
-            project.root.parent / ".neuroloom.db",
-        ):
-            assert not _containment.credential_matches_root(db, project.root)
-
-    def test_unit_symlinked_spelling_of_the_root_matches(
-        self, project: Project, tmp_path: Path
-    ) -> None:
-        alias = tmp_path / "alias"
-        alias.symlink_to(project.root, target_is_directory=True)
-        assert _containment.credential_matches_root(alias / ".neuroloom.db", project.root)
-
-    def test_unit_unresolvable_path_fails_closed(self, project: Project) -> None:
-        assert not _containment.credential_matches_root(Path("bad\x00dir/.neuroloom.db"), project.root)
+    The database is now pinned to ``project_root()``, so a nested or sibling
+    project's own key is never read and there is nothing for a tripwire to
+    guard.  What remains is the positive control: the project's own key still
+    sends, with ``CLAUDE_PROJECT_DIR`` set or unset.  The nested-project case
+    itself is covered over the wire in ``test_project_root.py``.
+    """
 
     # -- preload_context ---------------------------------------------------
-
-    def test_preload_sibling_key_with_inside_project_read_is_skipped(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """The reproduced bug: cwd=sibling (own db + key), CLAUDE_PROJECT_DIR=project,
-        and the file read IS inside the project.  Containment alone passes it."""
-        db = project.other / ".neuroloom.db"
-        out, fetch = _run_preload(
-            project,
-            monkeypatch,
-            capsys,
-            _read(str(project.root / "src" / "auth_handler.py")),
-            cwd=project.other,
-            db_at=db,
-        )
-        _assert_skipped(project, out, fetch, db_at=db, reason="credential_root_mismatch")
 
     def test_preload_same_call_with_the_projects_own_key_sends(
         self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1428,35 +1395,6 @@ class TestCredentialMatchesRoot:
             project, monkeypatch, capsys, _read(str(project.root / "src" / "auth_handler.py"))
         )
         fetch.assert_called_once()
-
-    def test_preload_nested_project_key_is_skipped(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        db = project.root / "src" / ".neuroloom.db"
-        out, fetch = _run_preload(
-            project,
-            monkeypatch,
-            capsys,
-            _grep("def auth_handler"),
-            cwd=project.root / "src",
-            db_at=db,
-        )
-        _assert_skipped(project, out, fetch, db_at=db, reason="credential_root_mismatch")
-
-    def test_preload_mismatch_precedes_the_target_check(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Even a target the containment rule would reject records the mismatch."""
-        db = project.other / ".neuroloom.db"
-        out, fetch = _run_preload(
-            project,
-            monkeypatch,
-            capsys,
-            _read(str(project.other / "secret.py")),
-            cwd=project.other,
-            db_at=db,
-        )
-        _assert_skipped(project, out, fetch, db_at=db, reason="credential_root_mismatch")
 
     def test_preload_unset_project_dir_is_not_a_regression(
         self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1470,32 +1408,6 @@ class TestCredentialMatchesRoot:
         fetch.assert_called_once()
 
     # -- capture -----------------------------------------------------------
-
-    def test_capture_sibling_key_with_inside_project_read_is_dropped(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db = project.other / ".neuroloom.db"
-        post, sent = _run_capture(
-            project,
-            monkeypatch,
-            _read_event(str(project.root / "src" / "auth_handler.py")),
-            cwd=project.other,
-            db_at=db,
-        )
-        _assert_dropped(project, post, sent, db_at=db, reason="credential_root_mismatch")
-
-    def test_capture_nested_project_key_is_dropped(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db = project.root / "src" / ".neuroloom.db"
-        post, sent = _run_capture(
-            project,
-            monkeypatch,
-            {"tool_name": "Grep", "tool_input": {"pattern": "api_key"}},
-            cwd=project.root / "src",
-            db_at=db,
-        )
-        _assert_dropped(project, post, sent, db_at=db, reason="credential_root_mismatch")
 
     def test_capture_projects_own_key_still_captures(
         self, project: Project, monkeypatch: pytest.MonkeyPatch
@@ -1517,30 +1429,6 @@ class TestCredentialMatchesRoot:
         post.assert_called_once()
 
     # -- cache_prefetch ----------------------------------------------------
-
-    def test_prefetch_nested_project_key_is_skipped_with_no_io(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """`cd src` where src has its own .neuroloom.db: the target is inside the
-        project, but the key belongs to the nested project."""
-        nested_db = project.root / "src" / ".neuroloom.db"
-        prefetch, open_db, called = _run_prefetch(
-            project, monkeypatch, str(project.root / "src"), db_at=nested_db
-        )
-        assert not called.wait(timeout=0.3)
-        prefetch.assert_not_called()
-        open_db.assert_not_called()  # exits before touching any DB
-        assert not nested_db.exists()
-
-    def test_prefetch_sibling_key_is_skipped(
-        self, project: Project, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        prefetch, open_db, _ = _run_prefetch(
-            project, monkeypatch, str(project.root), process_cwd=project.other,
-            db_at=project.other / ".neuroloom.db",
-        )
-        prefetch.assert_not_called()
-        open_db.assert_not_called()
 
     def test_prefetch_projects_own_key_still_prefetches(
         self, project: Project, monkeypatch: pytest.MonkeyPatch
@@ -2643,14 +2531,14 @@ class TestPreloadSendsRootRelativePath:
         assert bodies == [{"query": "def auth handler", "format": "nudge"}]
         assert "file_path" not in bodies[0]
 
-    def test_the_cache_key_stays_absolute_and_still_works(
+    def test_the_cache_key_is_the_root_relative_target_and_still_works(
         self, project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """The key is local only.  It must still identify the file, and a repeat read must hit it."""
+        """The key is local only (D178d: the root-relative target).  A repeat read must hit it."""
         target = self._make(project, "src/a/b.py")
         _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
 
-        expected_key = _pc_mod._cache_key(str(target), str(project.root))
+        expected_key = _pc_mod._cache_key("src/a/b.py", str(project.root))
         assert _query(project, "SELECT cache_key FROM cache") == [(expected_key,)]
 
         out, bodies = _run_preload_over_the_wire(project, monkeypatch, capsys, _read(str(target)))
