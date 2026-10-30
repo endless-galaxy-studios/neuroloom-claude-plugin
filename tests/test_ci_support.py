@@ -23,7 +23,6 @@ import pytest
 import pyhooks.session_start as _ss_mod
 from tests import ci_support
 
-_FLOOR_PYTHON = Path("/usr/local/bin/python3.10")
 _CLOSED_LOOPBACK = "http://127.0.0.1:9"
 
 
@@ -407,17 +406,17 @@ def test_runner_launcher_run_accepts_an_interpreter_parameter(
     assert black_hole.connection_count() == 0
 
 
-@pytest.mark.skipif(not _FLOOR_PYTHON.exists(), reason="floor interpreter not installed")
 def test_runner_works_under_the_floor_interpreter(
     tmp_path: Path, black_hole: ci_support.BlackHole
 ) -> None:
+    floor_python = ci_support.require_py310()
     run = ci_support.run_hook(
         "pyhooks.cache_prefetch",
         stdin="{}",
         cwd=tmp_path,
         scratch=tmp_path / "scratch",
         black_hole_url=black_hole.url,
-        interpreter=str(_FLOOR_PYTHON),
+        interpreter=floor_python,
     )
     assert run.returncode == 0
 

@@ -724,6 +724,66 @@ def test_no_pyhook_outside_containment_names_a_cwd_source() -> None:
     assert offenders == [], f"no-getcwd-scan: these files still mention a cwd source: {offenders}"
 
 
+# Extra spellings of "the current directory".  realpath is scanned in pyhooks only:
+# the seed script legitimately resolves its absolute --project-root argument.
+_CWD_PATH_PATTERN = re.compile(r"Path\(\s*[\"']?\.?[\"']?\s*\)")
+_REALPATH_PATTERN = re.compile(r"\brealpath\b")
+
+
+def test_no_pyhook_outside_containment_spells_cwd_as_path_dot_or_realpath() -> None:
+    offenders = []
+    for p in _scan_targets():
+        text = p.read_text(encoding="utf-8")
+        offenders += [f"{p.name}:{m.group(0)}" for m in _CWD_PATH_PATTERN.finditer(text)]
+        if p.parent.name == "pyhooks":
+            offenders += [f"{p.name}:{m.group(0)}" for m in _REALPATH_PATTERN.finditer(text)]
+    assert offenders == [], f"no-getcwd-scan-extra: these files spell the cwd another way: {offenders}"
+
+
+def test_the_extra_cwd_patterns_match_each_spelling_they_exist_to_catch() -> None:
+    for sample in ("Path()", "Path('.')", 'Path(".")', "Path( '' )", 'Path("")', "Path(  )"):
+        assert _CWD_PATH_PATTERN.search(sample), f"extra-pattern: misses {sample!r}"
+    for sample in ("Path(x)", "Path(root) / 'a'", "Path('a.py')"):
+        assert not _CWD_PATH_PATTERN.search(sample), f"extra-pattern: flags innocent {sample!r}"
+    assert _REALPATH_PATTERN.search("os.path.realpath(x)"), "extra-pattern: misses realpath"
+
+
+def _project_dir_literal_sites(path: Path) -> list[int]:
+    """Line numbers where the string "CLAUDE_PROJECT_DIR" is a value other than a docstring."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docstrings.add(id(body[0].value))
+    return [
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and n.value == "CLAUDE_PROJECT_DIR" and id(n) not in docstrings
+    ]
+
+
+def test_only_containment_reads_claude_project_dir_as_a_value() -> None:
+    offenders = [
+        f"{p.name}:{line}" for p in _scan_targets() for line in _project_dir_literal_sites(p)
+    ]
+    assert offenders == [], f"project-dir-literal-scan: code outside containment names the variable: {offenders}"
+
+
+def test_the_project_dir_literal_scan_is_live(tmp_path: Path) -> None:
+    code = tmp_path / "probe.py"
+    code.write_text(
+        '"""CLAUDE_PROJECT_DIR in a docstring."""\n'
+        "# CLAUDE_PROJECT_DIR in a comment\n"
+        'x = os.environ.get("CLAUDE_PROJECT_DIR")\n',
+        encoding="utf-8",
+    )
+    assert _project_dir_literal_sites(code) == [3], "project-dir-literal-scan: only the code use must be found"
+    real = PLUGIN_ROOT / "pyhooks" / "containment.py"
+    assert _project_dir_literal_sites(real), "project-dir-literal-scan: containment.py must hold the literal"
+
+
 def test_the_cwd_scan_pattern_matches_each_spelling_it_exists_to_catch() -> None:
     """Guards the pattern against vacuity and typos, one spelling at a time."""
     for sample in ("os.getcwd()", "Path.cwd()", "os.path.abspath(x)", "``Path.cwd``",

@@ -859,26 +859,44 @@ def write_codeweaver_stub(directory: Path) -> Path:
     return directory
 
 
+def py310_path() -> str:
+    """Path of the python3.10 test interpreter, or "" when it is not installed.
+
+    ``NEUROLOOM_TEST_PY310`` wins, then ``shutil.which("python3.10")``.  This is
+    the one place the suite discovers the 3.10 floor interpreter.
+    """
+    found = os.environ.get("NEUROLOOM_TEST_PY310", "") or shutil.which("python3.10") or ""
+    return found if found and Path(found).exists() else ""
+
+
+_PY310_SKIP_REASON = "python3.10 not found (set NEUROLOOM_TEST_PY310 or put it on PATH)"
+
+
+def require_py310() -> str:
+    """Return the python3.10 path, or skip the calling test with a visible reason."""
+    import pytest  # noqa: PLC0415 (test-time dependency, kept out of module import)
+
+    found = py310_path()
+    if not found:
+        pytest.skip(_PY310_SKIP_REASON)
+    return found
+
+
 def interpreter_params() -> list[Any]:
     """pytest params for the suite interpreter plus python3.10.
 
-    python3.10 comes from ``NEUROLOOM_TEST_PY310`` or ``shutil.which``.  When it
-    is missing the param is still emitted, marked skip, so the gap shows up as a
-    SKIP in the report rather than as a quietly shorter matrix.
+    When python3.10 is missing the param is still emitted, marked skip, so the
+    gap shows up as a SKIP in the report rather than as a quietly shorter matrix.
     """
     import pytest  # noqa: PLC0415 (test-time dependency, kept out of module import)
 
-    override = os.environ.get("NEUROLOOM_TEST_PY310", "")
-    found = override or shutil.which("python3.10") or ""
-    missing = not found or not Path(found).exists()
+    found = py310_path()
     return [
         pytest.param(sys.executable, id="suite-python"),
         pytest.param(
             found or "python3.10",
             id="py310",
-            marks=pytest.mark.skipif(
-                missing, reason="python3.10 not found (set NEUROLOOM_TEST_PY310 or put it on PATH)"
-            ),
+            marks=pytest.mark.skipif(not found, reason=_PY310_SKIP_REASON),
         ),
     ]
 

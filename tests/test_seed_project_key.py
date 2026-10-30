@@ -875,6 +875,41 @@ def test_abbreviated_project_root_flag_is_refused(
     assert db_files(ignored_git_repo) == [], "an abbreviated flag must not be accepted"
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_help_prints_usage_on_stdout_and_exits_0(
+    ignored_git_repo: Path, tmp_path: Path, flag: str
+) -> None:
+    run = run_seed([flag], stdin="", scratch=tmp_path, cwd=ignored_git_repo)
+    assert run.returncode == 0, f"{flag}: help must exit 0"
+    assert run.stderr == "", f"{flag}: help must not write to stderr"
+    assert 'printf %s "$KEY" | python3 seed_project_key.py --project-root DIR' in run.stdout, (
+        f"{flag}: the help text must show the stdin example"
+    )
+    assert "--project-root" in run.stdout and "Exit codes" in run.stdout, f"{flag}: usage incomplete"
+    assert_no_leak(run, f"{flag} help")
+    assert db_files(ignored_git_repo) == [], f"{flag}: help must not seed anything"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["-h", "--project-root", "/x"],
+        ["--help", KEY],
+        ["-h", "-h"],
+        ["--help=1"],
+        ["-hh"],
+    ],
+    ids=["help-plus-flag", "help-plus-key", "help-twice", "help-with-value", "bundled"],
+)
+def test_help_mixed_with_other_arguments_is_still_a_fixed_failure(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    run = run_seed(argv, stdin=KEY, scratch=tmp_path)
+    assert_fixed_failure(run, f"help mixed with arguments {argv[0]}", "invalid arguments")
+    assert run.stdout == "", "help mixed with arguments: nothing may be printed on stdout"
+    assert "--project-root /x" not in run.stderr, "help mixed with arguments: argv was echoed"
+
+
 @pytest.mark.parametrize(
     "argv_style",
     ["after-flag", "before-flag", "alone", "key-as-option-value"],

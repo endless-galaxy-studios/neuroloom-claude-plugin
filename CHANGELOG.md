@@ -6,16 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-CD renames this heading to the version and date when bumping. Everything here is D178d.
-
 ### Breaking Changes
 
 - **Hooks now follow the project root, not the directory Claude is in.** `CLAUDE_PROJECT_DIR` (else the hook process's directory) decides where `.neuroloom.db` lives and which key, session row, cache entries and debounce state every hook uses. Nothing migrates. See "Changed" for what orphans on upgrade.
+- **Nested projects now send under the root's key.** Nested-repo content reaches the root's workspace (details under "Changed").
+- **A session started with no key stays dormant after a `cd` into a keyed sub-project.** The root decides (details under "Changed").
+- **`.neuroloom.db*` replaces `.neuroloom.db` in `.gitignore`.** A project with only the bare entry gets the new line appended once (details under "Changed").
 - **The CI-mode stdout lines are a contract, and changing their wording is a breaking change.** The three base `session_start` lines (below, under "Added") and the two SDLC lines are matched byte-for-byte by factory workflows and tests. A wording change will be announced here under "Breaking Changes" with a migration note, not slipped into a patch release.
 
 ### Added
 
-- **CI mode.** `NEUROLOOM_MODE=ci` turns on a mode for unattended runs (for example `claude -p` in a GitHub Actions job). In CI mode no hook edits a tracked file, runs `git`, `pip` or `venv`, makes an upload, or starts a thread or subprocess; the only network call is the `POST /api/v1/context` lookup in `preload_context`. See the README's "CI mode" section for every hook.
+- **CI mode.** `NEUROLOOM_MODE=ci` turns on a mode for unattended runs (for example `claude -p` in a GitHub Actions job). In CI mode no hook edits a tracked file, runs `git`, `pip` or `venv`, makes an upload, or starts a thread or subprocess; the only network call is the `POST /api/v1/context` lookup in `preload_context` (see Known limits in the README: the result may not reach the agent on Claude Code 2.1.314). See the README's "CI mode" section for every hook.
   - `session_start` prints exactly one of these lines on stdout:
     - `[Neuroloom CI mode] Ready. Memory lookups are on; observations are not uploaded.`
     - `[Neuroloom CI mode] No project key was seeded, so Neuroloom is off for this job.`

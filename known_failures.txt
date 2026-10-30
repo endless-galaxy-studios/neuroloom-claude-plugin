@@ -5,13 +5,15 @@
 # Captured via:  .venv/bin/python -m pytest tests/ -q --tb=no -rfE
 # Base HEAD:     795e8da (D178d branch d178d-ci-mode, before the Phase 1 commit)
 # Date:          2026-10-30
-# Result:        3 failed, 833 passed, 1 skipped (4 failed / 832 passed when the FLAKY entry fails)
+# Result:        3 failed, 1273 passed, 1 skipped, 1 xfailed (4 failed / 1272 passed when the FLAKY entry fails)
 #
 # Gate: the new tests pass AND the failing set is a subset of this file AND this
-# file does not grow.  Mechanical check (prints nothing when the gate holds):
-# (from a worktree, use <main checkout>/neuroloom-claude-plugin/.venv/bin/python)
-#   comm -23 <(.venv/bin/python -m pytest tests/ -q --tb=no -rfE | sed -En 's/^(FAILED|ERROR) ([^ ]+).*/\2/p' | sort) <(grep -v '^#' known_failures.txt | grep . | sort)
-# (needs bash or zsh for <(...); uses POSIX ERE so it also works with BSD sed on macOS.)
+# file does not grow.  Mechanical check, run from the plugin root (from a worktree,
+# use <main checkout>/neuroloom-claude-plugin/.venv/bin/python).  It prints the
+# offending test ids and exits 1 on a new failure, and ALSO exits 1 when the run
+# printed no pytest summary line (an empty or crashed run would otherwise pass):
+#   .venv/bin/python -m pytest tests/ -q --tb=no -rfE | .venv/bin/python -m tests.known_failures_gate known_failures.txt
+# The gate logic lives in tests/known_failures_gate.py and is tested by tests/test_known_failures_gate.py.
 #
 # Each entry is either STALE (the code it exercises moved and the test did not
 # follow; stays stale on purpose, D178d does not fix it) or FLAKY (a wall-clock

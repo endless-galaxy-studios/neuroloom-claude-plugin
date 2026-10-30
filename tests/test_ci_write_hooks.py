@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import socket
 import sqlite3
 import subprocess
@@ -180,6 +181,40 @@ def test_every_registered_hook_has_a_ci_test_home() -> None:
     assert not missing, f"hooks.json registers hooks with no CI-mode tests: {sorted(missing)}"
 
 
+_LAUNCHER_COMMAND = re.compile(r"python3 \$\{CLAUDE_PLUGIN_ROOT\}/run_hook\.py [a-z_.]+")
+
+
+def _hook_commands(node: object) -> list[str]:
+    if isinstance(node, dict):
+        found = [node["command"]] if isinstance(node.get("command"), str) else []
+        return found + [c for v in node.values() for c in _hook_commands(v)]
+    if isinstance(node, list):
+        return [c for v in node for c in _hook_commands(v)]
+    return []
+
+
+def test_every_registered_hook_command_goes_through_the_launcher() -> None:
+    """A hook that bypasses run_hook.py would silently skip the CI-mode launcher (-I, no venv)."""
+    config = json.loads((ci_support.PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    commands = _hook_commands(config)
+    assert commands, "hooks.json: no hook commands found"
+    bad = [c for c in commands if not _LAUNCHER_COMMAND.fullmatch(c)]
+    assert bad == [], f"hooks.json: commands that bypass the launcher: {bad}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -m pyhooks.capture",
+        "python3 ${CLAUDE_PLUGIN_ROOT}/pyhooks/capture.py",
+        "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py pyhooks.capture; rm -rf x",
+        "python3 ${CLAUDE_PLUGIN_ROOT}/run_hook.py",
+    ],
+)
+def test_launcher_command_pattern_rejects_bypasses(command: str) -> None:
+    assert not _LAUNCHER_COMMAND.fullmatch(command), f"launcher pattern accepts {command!r}"
+
+
 # ---------------------------------------------------------------------------
 # capture
 # ---------------------------------------------------------------------------
@@ -235,6 +270,57 @@ class TestCaptureCi:
             "capture CI: last_submit_ms must not be updated"
         )
         assert black_hole.connection_count() == 0, "capture CI: empty request allowlist violated"
+
+    def test_one_ci_recorded_trace_per_recorded_event(
+        self,
+        tmp_path: Path,
+        black_hole: ci_support.BlackHole,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _make_root(tmp_path)
+        _ci_env(monkeypatch, root, black_hole.url)
+        for _ in range(2):
+            _call_hook("pyhooks.capture", _capture_event(root), monkeypatch)
+        # A guarded (MCP) event records no row and must add no ci_recorded trace.
+        _call_hook(
+            "pyhooks.capture",
+            _capture_event(root, tool_name="mcp__neuroloom__memory_search", tool_input={}),
+            monkeypatch,
+        )
+        assert len(_buffer_rows(root)) == 2, "ci_recorded: two events should be recorded"
+        assert _db_count(root, "SELECT COUNT(*) FROM traces WHERE decision = 'ci_recorded'") == 2, (
+            "ci_recorded: exactly one trace row per recorded event"
+        )
+
+    def test_buffer_failure_writes_one_buffer_error_trace_and_exits_zero(
+        self,
+        tmp_path: Path,
+        black_hole: ci_support.BlackHole,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _make_root(tmp_path)
+        conn = sqlite3.connect(str(root / ".neuroloom.db"))
+        try:
+            conn.execute(
+                "CREATE TRIGGER refuse_buffer BEFORE INSERT ON event_buffer "
+                "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _ci_env(monkeypatch, root, black_hole.url)
+
+        result = _call_hook("pyhooks.capture", _capture_event(root), monkeypatch)
+
+        assert result.forbidden == [], f"capture CI buffer failure: forbidden calls {result.forbidden}"
+        assert result.exit_code in (None, 0), f"capture CI buffer failure: exit code {result.exit_code!r}"
+        assert _buffer_rows(root) == [], "capture CI buffer failure: a row was recorded despite the trigger"
+        assert _db_count(root, "SELECT COUNT(*) FROM traces WHERE decision = 'buffer_error'") == 1, (
+            "capture CI buffer failure: exactly one buffer_error trace expected"
+        )
+        assert _db_count(root, "SELECT COUNT(*) FROM traces WHERE decision = 'ci_recorded'") == 0, (
+            "capture CI buffer failure: no ci_recorded trace for an unrecorded event"
+        )
 
     @pytest.mark.parametrize(
         "case", ["no_key", "no_session", "corrupt_session", "mcp_tool", "outside_root", "malformed_cwd"]

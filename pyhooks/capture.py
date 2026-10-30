@@ -192,10 +192,7 @@ def _ci_row_json(obs: dict[str, object]) -> str:
     content = str(obs["content"])
     original = len(content)
     marker = f"…[truncated: original {original} chars]"
-    category = obs.get("category")
-    capped = dict(obs)
-    if isinstance(category, str):
-        capped["category"] = category[:256]
+    capped = dict(obs)  # "category" is the tool name, already cut to 256 chars
     keep = original
     for _ in range(12):
         # Escaping can inflate content (quotes, non-ASCII), so shrink in

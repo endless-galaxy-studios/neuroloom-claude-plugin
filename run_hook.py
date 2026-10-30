@@ -51,7 +51,7 @@ def _resolve_python() -> tuple[Path, bool]:
     """Return (interpreter_path, is_degraded).
 
     Venv resolution order:
-    0. CI mode                       — sys.executable, never degraded (FR-D7)
+    0. CI mode                       — sys.executable, never degraded
     1. ${CLAUDE_PLUGIN_DATA}/.venv  — persistent across plugin version bumps (CC v2.1.78+)
     2. PLUGIN_ROOT / ".venv"        — dev-mode fallback (no CLAUDE_PLUGIN_DATA set)
     3. sys.executable               — degraded, no venv found anywhere
@@ -60,7 +60,7 @@ def _resolve_python() -> tuple[Path, bool]:
     yet; the venv_py.exists() check handles this by falling through to the next tier.
     """
     if _ci_mode():
-        return Path(sys.executable), False  # D-10: no venv lookup in CI mode
+        return Path(sys.executable), False  # CI mode: no venv lookup (the checkout is untrusted)
 
     suffix = "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
 

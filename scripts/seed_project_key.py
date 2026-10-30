@@ -94,6 +94,21 @@ class _Parser(argparse.ArgumentParser):
         )
 
 
+_HELP_TEXT = """\
+usage: seed_project_key.py --project-root DIR
+
+Seed a per-project Neuroloom API key into DIR/.neuroloom.db.
+The key is read from stdin, never from an argument:
+
+  printf %s "$KEY" | python3 seed_project_key.py --project-root DIR
+
+--project-root DIR  required; an absolute path to an existing, writable directory.
+
+Exit codes: 0 on success, 1 on any failure (one fixed line on stderr, never
+the key).  -h and --help print this text and exit 0.
+"""
+
+
 def _parse(argv: list[str]) -> str:
     parser = _Parser(add_help=False, allow_abbrev=False)
     parser.add_argument("--project-root", required=True, action="append")
@@ -319,7 +334,7 @@ def _prepare_files(root: str) -> tuple[int, int] | None:
     O_EXCL|O_NOFOLLOW, then create the main db with O_EXCL.  Returns the main db's
     (st_dev, st_ino) for the post-save comparison (None where O_NOFOLLOW is missing).
     The window between this function and open_db's reopen of the main db by path
-    remains (accepted residual, recorded in the Phase 4 result doc)."""
+    remains (an accepted residual: the attacker needs write access to the project root)."""
     if not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod")):
         _narrow(root)  # platform without O_NOFOLLOW: the lstat checks are all we have
         return None
@@ -400,8 +415,13 @@ def _run(argv: list[str]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    # Only a lone -h/--help asks for help; any other use of them is a bad argument.
+    if args in (["-h"], ["--help"]):
+        sys.stdout.write(_HELP_TEXT)
+        return 0
     try:
-        db_path = _run(sys.argv[1:] if argv is None else argv)
+        db_path = _run(args)
     except _Fail as exc:
         _die(str(exc))
     sys.stdout.write(f"seeded project key into {db_path}\n")

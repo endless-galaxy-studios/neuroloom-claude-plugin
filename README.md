@@ -141,14 +141,32 @@ When you edit TypeScript or Python files, the plugin automatically parses each f
 
 ## CI mode
 
-CI mode is for **headless** runs: Claude Code started by a script (for example `claude -p` in a GitHub Actions job) with nobody at the keyboard. In that setting the normal hooks are the wrong behaviour. They edit tracked files (`.gitignore`, `CLAUDE.md`, `.mcp.json`), install packages from PyPI, start background threads that can outlive the hook, and upload everything the agent does. CI mode turns all of that off and keeps one thing: memory lookups before the agent reads a file.
+CI mode is for **headless** runs: Claude Code started by a script (for example `claude -p` in a GitHub Actions job) with nobody at the keyboard. In that setting the normal hooks are the wrong behaviour. They edit tracked files (`.gitignore`, `CLAUDE.md`, `.mcp.json`), install packages from PyPI, start background threads that can outlive the hook, and upload everything the agent does. CI mode turns all of that off and keeps one thing: it sends memory lookups before the agent reads a file.
 
 The CI-mode contract, in one place:
 
-- Hooks look up memory (`POST /api/v1/context`) and nothing else touches the network.
+- The base plugin's hooks send nothing but the `POST /api/v1/context` lookup. The SDLC plugin adds two read-only GETs. MCP tools and skills are not governed by this mode.
 - Observations are recorded to the local database only. They are never uploaded.
 - No hook edits a tracked file, runs `git`, runs `pip` or `venv`, or starts a thread or subprocess. Each hook process ends when its `main()` returns.
-- The project key is not read from any environment variable. A factory step seeds it into `.neuroloom.db` first (see [Seeding the project key](#seeding-the-project-key)).
+- The project key is not read from any environment variable. A factory step seeds it into `.neuroloom.db` first (see [Seeding the project key](#seeding-the-project-key)). The *factory* is the CI workflow that runs the agent, owned by z-sdlc.
+
+### Quick path
+
+The whole job, in the order it must run. `$ROOT` is one directory: the seed, the agent's start directory and the cleanup all use it.
+
+```bash
+ROOT="$GITHUB_WORKSPACE"                                  # 1. locate the project root
+rm -rf -- "${ROOT:?}"/.neuroloom.db*                      # 2. delete leftovers from an earlier job
+printf %s "$REPO_NEUROLOOM_KEY" \
+  | python3 "$NEUROLOOM_CLAUDE_PLUGIN_ROOT/scripts/seed_project_key.py" \
+      --project-root "$ROOT"                              # 3. seed (the key is in this step's env: only)
+cd "$ROOT" && NEUROLOOM_MODE=ci CLAUDE_PROJECT_DIR="$ROOT" \
+  claude -p "$PROMPT" --output-format stream-json --verbose > out.jsonl   # 4. run the agent
+grep -F '[Neuroloom CI mode] Ready.' out.jsonl            # 5. fail the job if the ready line is absent
+rm -rf -- "${ROOT:?}"/.neuroloom.db*                      # 6. clean up, in an always() step
+```
+
+`NEUROLOOM_CLAUDE_PLUGIN_ROOT` is the installed plugin's directory (for example, read it from `claude plugin list --json`). Keep that directory outside the checkout.
 
 ### Turning it on: `NEUROLOOM_MODE`
 
@@ -162,7 +180,7 @@ The CI-mode contract, in one place:
 
 The last row is deliberate. The parser **fails closed**: when it cannot tell what you meant, it picks the safe mode. A typo such as `cii` must not leave a CI job running the normal hooks, which write into the checkout and upload tool output. The cost is that `off`, `0` and `false` do not turn CI mode off; they turn it on. **To turn CI mode off, unset the variable.**
 
-Three places read the variable with the same rule: `pyhooks/config.py` (every `load()`), this plugin's `run_hook.py`, and the SDLC plugin's `run_hook.py`. The launchers decide before `pyhooks` can be imported, so each carries a small copy of the parser.
+Four places read the variable with the same rule: `pyhooks/config.py` (every `load()`), this plugin's `run_hook.py`, the SDLC plugin's `run_hook.py`, and the SDLC plugin's `sdlc_pyhooks`. The launchers decide before `pyhooks` can be imported, so each carries a small copy of the parser.
 
 For an unrecognised value, the base `session_start` writes one line to stderr and carries on in CI mode:
 
@@ -175,20 +193,6 @@ The value is echoed only when, after trimming, it is 1 to 16 characters from `A-
 ```
 [Neuroloom] NEUROLOOM_MODE <redacted, 40 chars> is not recognised; running in CI mode. Set NEUROLOOM_MODE=ci, or unset it for normal mode.
 ```
-
-### The three lines CI-mode SessionStart prints
-
-`session_start` prints exactly one of these lines on stdout in CI mode. Factories and workflows grep for them, so the wording is a contract: changing a line is a breaking change and is announced in the [changelog](CHANGELOG.md). The bracketed prefix is part of each line.
-
-| State | Line |
-|---|---|
-| A key was seeded and the database opened | `[Neuroloom CI mode] Ready. Memory lookups are on; observations are not uploaded.` |
-| No key (a missing, corrupt or unreadable database counts as no key) | `[Neuroloom CI mode] No project key was seeded, so Neuroloom is off for this job.` |
-| A key is present but the database could not be opened | `[Neuroloom CI mode] The project state could not be opened, so observations are not recorded.` |
-
-None of them names a path, a slash command or the key. Use the first line as proof that a job really entered CI mode: fail the job if it is absent.
-
-In a manual run of `claude -p --output-format stream-json --verbose` on Claude Code 2.1.314, the line appeared in the `stdout` field of the `SessionStart` `hook_response` event, with and without `--include-hook-events`. That run was on a laptop, not in GitHub Actions, and a different Claude Code version may report it differently.
 
 ### Environment
 
@@ -218,7 +222,7 @@ printf %s "$REPO_NEUROLOOM_KEY" \
 - Run seed, agent and cleanup as the **same user**. The database and its sidecar files are created with mode `0600`, so a different uid cannot read them. A leftover regular `.neuroloom.db` from an earlier run is reused and narrowed to `0600`.
 - Set `HOME`. The script gives `git` only `PATH` (absolute entries only), `HOME` and `LC_ALL=C`; with `HOME` unset, git may fail with exit 128.
 
-**The ignore precondition.** Before it writes anything, the script asks git whether `.neuroloom.db`, `.neuroloom.db-wal`, `.neuroloom.db-shm` and `.neuroloom.db-journal` are ignored. If any is not, it exits 1, writes nothing, and names the paths. There is no flag to skip the check. The repository's own `.gitignore` needs this line:
+**The ignore precondition.** Before it writes anything, the script asks git whether `.neuroloom.db`, `.neuroloom.db-wal`, `.neuroloom.db-shm` and `.neuroloom.db-journal` are ignored. If any is not, it exits 1, writes nothing, and names the paths. There is no flag to skip the check. The repository's own `.gitignore` needs a rule that makes git ignore all four files; `.neuroloom.db*` is the supported form:
 
 ```
 .neuroloom.db*
@@ -236,8 +240,8 @@ The check is skipped, with a note on stderr and exit 0, when `git` is not found 
 | Bad project root | `--project-root is not an existing directory (an absolute path is required)`; `project root is not writable` |
 | Bad key on stdin | `stdin is closed; pipe the key on stdin`; `could not read the key from stdin`; `the key on stdin is too long`; `the key on stdin is not valid UTF-8`; `no key on stdin`; `the key on stdin contains whitespace`; `the key on stdin must be printable ASCII characters only` |
 | Database not ignored | `git does not ignore <names>; add an entry to the repository's .gitignore that ignores .neuroloom.db* ...` |
-| The ignore check could not run | `git could not be run or timed out in the ignore check`; `the git ignore check failed ... (git exited 128 ...)`; `the git ignore check failed for a reason other than 'not ignored' (git exited N) ...` |
-| A database file is a link or not an ordinary file | `<name> is a symlink; refusing to write through it`; `<name> is not a regular file with a single link; refusing`; `<name> does not have a single link; refusing`; `<name> is not a regular file; refusing`; `<name> changed while it was being prepared`; `<name> was replaced during the write; the key may have been written through it`; and the `could not inspect`, `could not open ... safely`, `could not create ... safely` and `could not restrict ... to mode 0600` variants |
+| The ignore check could not run | `git could not be run or timed out in the ignore check`; `the git ignore check failed (git exited 128: a broken repository or git configuration, for example HOME unset with a system gitconfig that needs it); refusing to continue`; `the git ignore check failed for a reason other than 'not ignored' (git exited N) ...` |
+| A database file is a link or not an ordinary file | `<name> is a symlink; refusing to write through it`; `<name> is not a regular file with a single link; refusing`; `<name> does not have a single link; refusing`; `<name> is not a regular file; refusing`; `<name> changed while it was being prepared`; `<name> was replaced during the write; the key may have been written through it`; `<name> is a symlink or not a single regular file after the write; the key may have been written through it`; and the `could not inspect`, `could not open ... safely`, `could not create ... safely` and `could not restrict ... to mode 0600` variants |
 | The write did not stick | `the key could not be stored; read-back did not match` |
 
 The exit-128 case is how git reports a broken repository or configuration. If the checkout is owned by a different user than the one running the seed step, git may refuse it; the script passes `-c safe.directory=<repo>` to every git call, but that has **not been verified** against a repository owned by another uid (the development machine's git, 2.33.0, predates the behaviour). Record your image's git version, and run the seed step as the checkout's owner.
@@ -248,13 +252,27 @@ An interpreter older than 3.10 fails at import with a non-zero exit before any o
 
 | Hook | Event | CI-mode behaviour |
 |---|---|---|
-| `session_start` | SessionStart | Prints one of the three lines above. With a key, it opens the database, mints a local session id, writes one `sessions` row and one `ci_started` trace row in a single commit, and prints the ready line. With no key it opens nothing and creates no file. It makes **no** network call, starts no thread or subprocess, and skips everything else: `.gitignore`, `CLAUDE.md` and `.mcp.json` edits, the stale-session POST, `/sessions/start`, the event-buffer flush, trace pruning, the codeweaver install and upgrade, the tool catalog and the degraded-venv banner. |
-| `capture` | PostToolUse | The usual guards still apply: no key, no session row, a malformed session id, MCP self-calls, and targets outside the project root. If the event passes, it writes one `event_buffer` row **in the hook's own process** and exits. No request, no thread, and no send-rate throttle. The 10,000-row cap, trimmed to 8,000, still applies. Each row is capped at 64 KB: a longer `content` is cut and ends with a `…[truncated: original N chars]` marker. |
+| `session_start` | SessionStart | Prints one of the three lines in the table below. With a key, it opens the database, mints a local session id, writes one `sessions` row and one `ci_started` trace row in a single commit, and prints the ready line. With no key it opens nothing and creates no file. It makes **no** network call, starts no thread or subprocess, and skips everything else: `.gitignore`, `CLAUDE.md` and `.mcp.json` edits, the stale-session POST, `/sessions/start`, the event-buffer flush, trace pruning, the codeweaver install and upgrade, the tool catalog and the codeweaver-degraded banner. |
+| `capture` | PostToolUse | The usual guards still apply: no key, no session row, a malformed session id, MCP self-calls, and targets outside the project root. If the event passes, it writes one `event_buffer` row **in the hook's own process** and exits. No request, no thread, and no send-rate throttle. Each recorded event also adds one `ci_recorded` row to the `traces` table (a failed insert adds one `buffer_error` row instead). The 10,000-row cap, trimmed to 8,000, still applies. Each row is capped at 64 KB: a longer `content` is cut and ends with a `…[truncated: original N chars]` marker. |
 | `preload_context` | PreToolUse | With no key it prints `{}` and returns before opening the database, so a dormant job creates no file. With a key it looks up context as it does outside CI mode, with the same response cache (1 hour), circuit breaker (30 s) and per-session token budget, with two changes: the request waits up to **10 s** instead of 3 s, and the request body carries no session id. |
 | `code_graph_sync` | PostToolUse (Write, Edit) | Exits 0 before reading stdin, opening the database or importing codeweaver. |
 | `cache_prefetch` | CwdChanged | Exits 0 before reading stdin, opening the database or starting a thread. |
 
 Every hook uses the project root. In a CI job where the agent runs `cd sub` and then reads a file, the lookup goes out under the root's key with the path relative to the root (`sub/file.py`).
+
+### The three lines CI-mode SessionStart prints
+
+`session_start` prints exactly one of these lines on stdout in CI mode. Factories and workflows grep for them, so the wording is a contract: changing a line is a breaking change and is announced in the [changelog](CHANGELOG.md). The bracketed prefix is part of each line.
+
+| State | Line |
+|---|---|
+| A key was seeded and the database opened | `[Neuroloom CI mode] Ready. Memory lookups are on; observations are not uploaded.` |
+| No key (a missing, corrupt or unreadable database counts as no key) | `[Neuroloom CI mode] No project key was seeded, so Neuroloom is off for this job.` |
+| A key is present but the database could not be opened (read-only project directory, full disk, or a locked or corrupt schema) | `[Neuroloom CI mode] The project state could not be opened, so observations are not recorded.` |
+
+None of them names a path, a slash command or the key. Use the first line as proof that a job really entered CI mode: fail the job if it is absent.
+
+In a manual run of `claude -p --output-format stream-json --verbose` on Claude Code 2.1.314, the line appeared in the `stdout` field of the `SessionStart` `hook_response` event, with and without `--include-hook-events`. That run was on a laptop, not in GitHub Actions, and a different Claude Code version may report it differently.
 
 ### Python version and `python -I`
 
@@ -268,10 +286,19 @@ The launcher starts each hook as `python -I -c <bootstrap>` rather than `python 
 
 The factory must delete `.neuroloom.db*` (the database and its `-wal`, `-shm` and `-journal` files) in an `always()` step **right after the agent step**, before any commit, artifact upload or cache save. On a runner that keeps its workspace between jobs, a missed cleanup carries the key and the recordings into the next job.
 
+Delete both before and after the agent step, with `rm -rf -- "${GITHUB_WORKSPACE:?}"/.neuroloom.db*`. A leftover database that gets re-seeded keeps its old `event_buffer`, `sessions` and `traces` rows, so the pre-seed delete matters as much as the post-agent one. `always()` does not run when the runner is lost, so set a step timeout and do not rely on it alone. Seed, agent start directory and cleanup path must be the same directory, and the three steps must run as the same user.
+
+Put the key in the seed step's `env:` only, never at job level, so the agent process never inherits it. Keep the plugin root outside the checkout (`NEUROLOOM_CLAUDE_PLUGIN_ROOT`), so the agent cannot edit the hooks it is about to run.
+
+Worst case, the local record is about 640 MB (10,000 rows at 64 KB each).
+
 Do not reuse a CI database in a normal-mode session. CI rows are written with the same row type that a normal session replays and uploads, so a later normal-mode SessionStart on the same file would send them.
 
 ### Known limits
 
+- **Memory lookups may not reach the agent on Claude Code 2.1.314.** `preload_context` returns its result as top-level `additionalContext`. In one manual run on 2.1.314 the request went out and the hook printed the text, but the model did not receive it; it did receive the same text when the hook used `hookSpecificOutput.additionalContext` instead. This affects normal mode too. So "Memory lookups are on" in the ready line means the lookup is sent, not that the agent read the result. A fix is pending a decision.
+- **Developed and checked on macOS with Claude Code 2.1.314.** The z-sdlc smoke job in GitHub Actions has not run yet.
+- **`CLAUDE_PROJECT_DIR` unset in CI** makes the root fall back to the hook process's working directory, so an agent `cd` makes the hooks dormant. Set it, or start the agent in the seeded directory.
 - **Skills still use the directory you run them from.** `/neuroloom:status`, `/neuroloom:init` and `scripts/seed_code_graph.py` read `.neuroloom.db` from the current directory, not from the project root. Run from a subdirectory, a skill can look at a different (or missing) database than the hooks do. Hooks follow the project root; skills have not been moved.
 - **Windows is untested** for the CI launcher and the seed script.
 - **A link swapped into the project directory in the instant before SQLite reopens the database** is detected after the write, not prevented. It needs write access to the project directory, which the seed's own user already has.

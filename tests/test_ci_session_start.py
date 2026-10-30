@@ -127,8 +127,8 @@ class TestKeyedCiPath:
         assert _count(bait_repo.db_path, "SELECT COUNT(*) FROM event_buffer WHERE payload_type='document'") == 1, (
             "CI keyed: the buffered document row must survive"
         )
-        assert _count(bait_repo.db_path, "SELECT COUNT(*) FROM traces") >= 1, (
-            "CI keyed: a trace row is expected"
+        assert _count(bait_repo.db_path, "SELECT COUNT(*) FROM traces WHERE decision = 'ci_started'") == 1, (
+            "CI keyed: exactly one ci_started trace row is expected"
         )
         fired = [name for name, hit in bait_repo.fired().items() if hit]
         assert fired == [], f"CI keyed: bait triggers fired {fired}"

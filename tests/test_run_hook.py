@@ -28,6 +28,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests import ci_support
+
 # ---------------------------------------------------------------------------
 # Module loader — loads run_hook without running __main__
 # ---------------------------------------------------------------------------
@@ -284,7 +286,7 @@ def test_launcher_normal_mode_keeps_degraded_line(raw: str | None, monkeypatch: 
 # ---------------------------------------------------------------------------
 
 
-_SHADOW_CANDIDATES = ("current", "/usr/local/bin/python3.10", "/usr/local/bin/python3")
+_SHADOW_CANDIDATES = ("current", "py310", "/usr/local/bin/python3")
 
 
 def _shadow_python(candidate: str) -> str:
@@ -294,6 +296,8 @@ def _shadow_python(candidate: str) -> str:
 
     if candidate == "current":
         return sys.executable
+    if candidate == "py310":
+        candidate = ci_support.require_py310()
     if not os.path.exists(candidate):
         pytest.skip(f"{os.path.basename(candidate)} not installed")
     if os.path.realpath(candidate) == os.path.realpath(sys.executable):

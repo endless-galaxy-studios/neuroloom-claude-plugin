@@ -5,8 +5,10 @@ Runs once at the beginning of each Claude Code session.  Responsibilities, in
 order:
 
 1. Load configuration from environment / .neuroloom.db.
+1b. CI mode (``NEUROLOOM_MODE``): run ``_main_ci`` and return.  Nothing below
+    runs; see ``_main_ci``.
 2. Open the SQLite state database.
-2a. Ensure ``.neuroloom.db`` is listed in the project ``.gitignore``
+2a. Ensure ``.neuroloom.db*`` is listed in the project ``.gitignore``
     (non-fatal; the only step that runs regardless of API-key status).
 3. Guard: if no per-project API key is configured, print dormant/no-key
    message and exit 0. Steps 4-11 below do not run.
@@ -38,6 +40,9 @@ Design constraints
 - stdlib only — no third-party imports.
 - ``mypy --strict`` clean.
 - All trace writes go through ``pyhooks.trace.write`` and are always non-fatal.
+  The one deliberate exception is the direct INSERT of the ``ci_started`` row in
+  ``_record_ci_session``: ``trace.write`` swallows its own errors, and in CI
+  mode a lost trace row must be reported as "could not record".
 - HTTP calls use ``pyhooks.http.post_json``; network failures are silently skipped.
 - The module never raises out of ``main()``; the ``__main__`` guard wraps it in
   a top-level try/except.
@@ -920,7 +925,7 @@ def _warn_unrecognised_mode() -> None:
         return
     value = (raw or "").strip()  # mode parsing strips first, so echo what it saw
     # A secret placed here by mistake must not print: echo only short,
-    # identifier-shaped values (every spec 6.2 input qualifies).
+    # identifier-shaped values (every ordinary mode word qualifies).
     if _MODE_ECHO_RE.fullmatch(value):
         shown = json.dumps(value)
     else:
@@ -968,7 +973,7 @@ def _record_ci_session(cfg: _config.Config) -> bool:
 
 
 def _main_ci(cfg: _config.Config) -> None:
-    """FR-D1: the CI-mode SessionStart. No network, thread, subprocess or tracked-file edit."""
+    """The CI-mode SessionStart. No network, thread, subprocess or tracked-file edit."""
     key_present = bool(cfg.api_key)
     # No key: print and return before any database is opened.
     ready = _record_ci_session(cfg) if key_present else False
@@ -980,7 +985,8 @@ def main() -> None:
     Run the SessionStart hook.
 
     Follows the module docstring's step sequence (Steps 1-12, plus the
-    pre-guard Step 2a).  The database connection is always closed in a
+    pre-guard Step 2a).  In CI mode it returns after Step 1b (``_main_ci``),
+    before any other step.  The database connection is always closed in a
     ``finally`` block even if an unexpected exception occurs mid-way
     through.
     """

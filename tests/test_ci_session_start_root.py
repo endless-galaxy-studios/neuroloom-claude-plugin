@@ -76,3 +76,37 @@ def test_root_failing_after_key_read_is_unopenable(
     captured = capsys.readouterr()
     assert captured.out == UNOPENABLE_LINE + "\n", "root failure after key read: stdout must be the unopenable line"
     assert "Traceback" not in captured.err, "root failure after key read: a traceback reached stderr"
+
+
+def test_cd_into_subdirectory_still_records_the_session_under_the_root(
+    tmp_path: Path,
+    black_hole: ci_support.BlackHole,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Root pinning: CLAUDE_PROJECT_DIR wins over the process cwd after a ``cd``."""
+    import sqlite3
+
+    import pyhooks.session_start as ss
+    from pyhooks.config import save_project_api_key
+
+    root = tmp_path / "proj"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    save_project_api_key(root, ci_support.SENTINEL_KEY)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
+    monkeypatch.setenv("NEUROLOOM_MODE", "ci")
+    monkeypatch.setenv("NEUROLOOM_API_BASE", black_hole.url)
+    monkeypatch.chdir(sub)
+
+    ss.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("[Neuroloom CI mode] Ready."), "cd root pinning: the ready line was not printed"
+    assert not (sub / ".neuroloom.db").exists(), "cd root pinning: a database appeared in the subdirectory"
+    conn = sqlite3.connect(str(root / ".neuroloom.db"))
+    try:
+        keys = [str(r[0]) for r in conn.execute("SELECT session_key FROM sessions")]
+    finally:
+        conn.close()
+    assert keys == [str(root.resolve())], f"cd root pinning: session keyed {keys}, expected the root"
