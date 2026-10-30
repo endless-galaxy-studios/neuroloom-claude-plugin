@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+CD renames this heading to the version and date when bumping. Everything here is D178d.
+
+### Breaking Changes
+
+- **Hooks now follow the project root, not the directory Claude is in.** `CLAUDE_PROJECT_DIR` (else the hook process's directory) decides where `.neuroloom.db` lives and which key, session row, cache entries and debounce state every hook uses. Nothing migrates. See "Changed" for what orphans on upgrade.
+- **The CI-mode stdout lines are a contract, and changing their wording is a breaking change.** The three base `session_start` lines (below, under "Added") and the two SDLC lines are matched byte-for-byte by factory workflows and tests. A wording change will be announced here under "Breaking Changes" with a migration note, not slipped into a patch release.
+
+### Added
+
+- **CI mode.** `NEUROLOOM_MODE=ci` turns on a mode for unattended runs (for example `claude -p` in a GitHub Actions job). In CI mode no hook edits a tracked file, runs `git`, `pip` or `venv`, makes an upload, or starts a thread or subprocess; the only network call is the `POST /api/v1/context` lookup in `preload_context`. See the README's "CI mode" section for every hook.
+  - `session_start` prints exactly one of these lines on stdout:
+    - `[Neuroloom CI mode] Ready. Memory lookups are on; observations are not uploaded.`
+    - `[Neuroloom CI mode] No project key was seeded, so Neuroloom is off for this job.`
+    - `[Neuroloom CI mode] The project state could not be opened, so observations are not recorded.`
+  - `capture` records each event as a row in the local `event_buffer` table instead of uploading it (no throttle, no thread, rows capped at 64 KB). `code_graph_sync` and `cache_prefetch` exit immediately. `preload_context` waits up to 10 s for a lookup (3 s outside CI mode) and sends no session id.
+  - The switch fails closed: unset, empty or whitespace-only is normal mode, `ci` is CI mode, and any other non-empty value (`cii`, `off`, `false`) is also CI mode, with one stderr line from `session_start`. To turn CI mode off, unset the variable. If the value is not 1 to 16 characters of letters, digits, `_` or `-`, the line prints `<redacted, N chars>` instead of the value.
+  - In CI mode `run_hook.py` runs hooks with `sys.executable` (no venv lookup, no degraded-venv line) under `python -I`, so a planted `pyhooks/` or `json.py` in the checkout is never imported.
+  - Needs `python3` 3.10 or later on `PATH`. The README's general `python3` >= 3.11 prerequisite is unchanged.
+- **`scripts/seed_project_key.py`** writes a per-project API key into `<project root>/.neuroloom.db` for a factory step to run before the agent. The key comes in on stdin only; `--project-root` (absolute, required) names the directory. It refuses to write unless git reports `.neuroloom.db`, `-wal`, `-shm` and `-journal` as ignored by the repository's own rules, refuses links and non-regular files, holds the files to mode 0600, and reads the key back. Every failure exits 1 with a fixed message that never contains the key.
+- **`Config` additions** in `pyhooks/config.py`: `ci_mode: bool` (default `False`, so existing `Config(...)` calls keep working); `api_key` is hidden from `repr`; a public `parse_mode()` (returns whether CI is on and whether the value was recognised) and a public `save_project_api_key()` (writes through `open_db`, never raises). `config.load()` now never raises: a deleted working directory with no `CLAUDE_PROJECT_DIR` yields a dormant `Config` whose `state_db_path` is `/dev/null/.neuroloom.db` (POSIX only; a path that can never be opened), and a missing, corrupt or unreadable database reports no key and logs at DEBUG rather than WARNING.
+
+### Changed
+
+- **Project-root cutover.** `session_start`, `capture`, `preload_context`, `cache_prefetch` and `code_graph_sync` all read the key and write state under `<project root>/.neuroloom.db`, derived from the one resolver `containment.project_root()`. After the agent runs `cd` into a subdirectory, hooks keep using the root's database and no hook creates a `.neuroloom.db` there. Consequences on upgrade:
+  - Session, cache and debounce rows keyed by an old subdirectory path are orphaned. In the common case with no `cd`, the key string is identical and nothing orphans.
+  - The inject-cache key changed (it is now the target relative to the project root), so every existing inject cache entry is orphaned once.
+  - `.neuroloom.db` files already sitting in subdirectories are left alone and no longer read. They can hold raw tool input and output; delete them.
+  - A hook that used to go dormant after a `cd` now keeps working.
+  - When `CLAUDE_PROJECT_DIR` is unset the root falls back to the hook process's directory, which follows `cd` (the `project_root_fallback_cwd` trace still records it).
+- **Nested projects now send under the root's key.** A `cd` into a nested project that has its own `.neuroloom.db` used to make `preload_context`, `capture` and `cache_prefetch` skip. They now send, under the **root's** key, so that nested repository's content goes to the root's workspace. The inverse case also exists: a session started in a directory with no key stays dormant after a `cd` into a sub-project that has one, because the root decides.
+- `code_graph_sync` takes the project root as its root, and resolves a relative `file_path` against the event's `cwd` rather than the process's. It now exits when the event's `cwd` is not an existing directory. This supersedes the 0.9.2 statement that it keeps the hook's working directory as its root.
+- **`.neuroloom.db*` replaces `.neuroloom.db` in `.gitignore`.** Outside CI mode, `session_start` now writes `.neuroloom.db*` (covering `-wal` and `-shm`) and counts a project as covered only when that exact line is present, so a project with only the bare entry gets `.neuroloom.db*` appended once. CI mode never edits `.gitignore`. The README's post-installation step now says `.neuroloom.db*`.
+- The README's advice to set `NEUROLOOM_CODEWEAVER_OFFLINE` "in CI" is corrected: CI mode skips the codeweaver install and upgrade outright, and outside CI mode the variable skips the install but a version check against PyPI can still run when `neuroloom-codeweaver` is importable.
+- The SDLC plugin's hooks read the key through `config.load()`, so they inherit the root's key and the root cutover along with the base hooks. In CI mode the SDLC plugin finds this plugin only through `NEUROLOOM_CLAUDE_PLUGIN_ROOT`; see its changelog.
+
+### Removed
+
+- **`credential_matches_root` and every `credential_root_mismatch` skip.** 0.9.2 skipped `preload_context`, `capture` and `cache_prefetch` unless the directory holding `.neuroloom.db` was the project root, to stop a `cd` into a sibling repository from sending the original project's files with the sibling's key. That guard was the only thing standing between the hooks and the wrong key. Now that every hook reads the key from the project root's database, the mismatch cannot arise, so the guard is gone. This supersedes the 0.9.2 paragraph "The project root and the API key must agree" and the 0.9.2 statement that `code_graph_sync` keeps the process's working directory as its root. Path containment (reads outside the project are not sent) is unchanged.
+
 ## [0.9.2] - 2026-10-29
 
 ### Fixed
