@@ -339,7 +339,12 @@ class TestEventBufferPayloadType:
         _seed_session(conn, workspace_key, last_submit_ms=0)
         conn.close()
 
-        stdin_data = _make_event("Write")
+        # The Write must target a file INSIDE the project (tmp_path): capture drops
+        # events about files outside the project root (D178e item 13), and the
+        # default fixture path /tmp/x.py is outside it.
+        stdin_data = _make_event(
+            "Write", extra={"tool_input": {"file_path": str(tmp_path / "x.py")}}
+        )
 
         monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "test-key")
         monkeypatch.setenv("NEUROLOOM_API_BASE", "http://localhost:19999")

@@ -18,15 +18,36 @@ Design constraints
 - Cache key matches ``pyhooks.preload_context._cache_key_nudge`` exactly:
     workspace_root = str(Path(os.getcwd()).resolve())  — same as preload_context.py
     query         = event["cwd"]                       — new directory from hook JSON
+- Only warms a directory inside the project root (see Containment below).
 - Always exits 0 — CwdChanged exit code is ignored by CC.
 
 Cache key parameters (IMPORTANT)
 ---------------------------------
 ``query`` is the event's ``cwd`` field (the new directory Claude navigated
-to).  ``workspace_root`` is the *process* cwd resolved to an absolute path —
-the hook process still runs in the project root, not the navigated-to
-directory.  Using ``cwd`` from the event as ``workspace_root`` would produce
-mismatched keys that ``preload_context.py`` would never look up.
+to).  ``workspace_root`` is the *process* cwd resolved to an absolute path.
+Claude Code spawns hooks in its *current* directory and updates that directory
+before CwdChanged hooks fire, so after a ``cd`` the process cwd IS the new
+directory and ``workspace_root == query``.  Where the cache key and
+``.neuroloom.db`` should live is therefore an open question that is
+deliberately NOT decided here (it belongs with the base-plugin CI-mode work,
+D178d); this module keeps using the process cwd so its keys keep matching
+``preload_context.py``'s.
+
+Containment
+-----------
+The project root for containment is ``CLAUDE_PROJECT_DIR`` (stable across
+``cd``), falling back to the process cwd.  The fallback is weak for every hook
+that uses ``pyhooks.containment`` (``preload_context`` and ``capture`` as well
+as this one), and starkest here: with ``CLAUDE_PROJECT_DIR`` unset the root and
+the ``cd`` target are the same directory, so the check passes trivially and the
+only thing protecting the upload is that no ``.neuroloom.db`` (hence no API
+key) exists in the new directory.  Claude Code sets ``CLAUDE_PROJECT_DIR`` for
+hooks, so the fallback matters mainly for tests and older versions; the hook
+traces ``project_root_fallback_cwd`` when it takes it.
+
+The project root must also be the directory the API key was read from
+(``containment.credential_matches_root``); after a ``cd`` into a nested project
+that has its own ``.neuroloom.db`` the hook exits without sending.
 """
 
 import hashlib
@@ -40,6 +61,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pyhooks.containment as containment
 import pyhooks.trace as trace
 from pyhooks.config import Config, load
 from pyhooks.db import open_db
@@ -179,14 +201,46 @@ def main() -> None:
         sys.exit(0)
 
     # ------------------------------------------------------------------ 5
-    # workspace_root is the process cwd — the project root.  The hook process
-    # is NOT re-spawned in the new directory; it inherits the project root.
+    # workspace_root is the hook process's cwd.  Claude Code runs hooks in its
+    # *current* directory and has already applied the ``cd`` by the time this
+    # hook fires, so this is typically the NEW directory, not the project root.
+    # It stays the cache-key component so keys match preload_context.py; it is
+    # not used for containment (below).
     workspace_root = str(Path(os.getcwd()).resolve())
+
+    # ------------------------------------------------------------------ 5b
+    # Only warm a directory inside the project root.  The directory is sent to
+    # the API as a query, so a ``cd`` to ~/.ssh or a sibling repo must not
+    # leave the machine.  The root is CLAUDE_PROJECT_DIR, not workspace_root:
+    # comparing the new directory with the process cwd compares it with itself.
+    # Exit before opening the DB: no API call, no cache write, no I/O.
+    project_root = containment.project_root()
+    if not containment.within_root(new_cwd, project_root):
+        sys.exit(0)
+
+    # A ``cd`` target is an existing directory by definition.  One that cannot be
+    # resolved to one -- a symlink loop, a NUL byte -- is a malformed event: skip.
+    # (``within_root`` alone is not enough: on newer Pythons it resolves a loop
+    # under the project root to an "inside" path instead of raising.)
+    if containment.session_cwd(data) is None:
+        sys.exit(0)
+
+    # The project root must also be the directory the API key came from: after
+    # a `cd` into a nested project with its own .neuroloom.db, the key would
+    # belong to a different workspace than this project's.  Same silent,
+    # zero-I/O exit.  See pyhooks/containment.py.
+    if not containment.credential_matches_root(cfg.state_db_path, project_root):
+        sys.exit(0)
 
     # ------------------------------------------------------------------ 6
     conn = open_db(cfg.state_db_path)
 
     try:
+        # With CLAUDE_PROJECT_DIR unset the root is the process cwd, which
+        # follows `cd` -- containment is then only as strong as that cwd.
+        if containment.project_root_is_fallback():
+            trace.write(conn, _SCRIPT, "project_root_fallback_cwd")
+
         # -------------------------------------------------------------- 7
         # Debounce: check whether a prefetch_fired trace for this workspace
         # was written within the last _DEBOUNCE_SECONDS.  Uses the traces

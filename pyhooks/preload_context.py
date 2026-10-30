@@ -48,8 +48,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from pyhooks import config as _config_mod
+from pyhooks import containment as _containment
 from pyhooks import db as _db_mod
 from pyhooks import trace as _trace_mod
 
@@ -196,6 +198,29 @@ def _extract_bash_pattern(sub_tool: str, command: str) -> str:
         return pattern
 
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Project containment
+# ---------------------------------------------------------------------------
+
+
+def _targets_outside_project(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    command: str,
+    root: Path,
+    cwd: Path | None,
+) -> bool:
+    """Return True if this call's target is outside *root*, or cannot be proven inside.
+
+    Read, Glob and Grep are judged by their tool input; Bash ``bfs``/``ugrep``
+    by the words of the command.  The rules live in ``pyhooks.containment`` so
+    that every hook applies the same one.
+    """
+    if tool_name == "Bash":
+        return _containment.bash_search_outside_root(command, root, cwd)
+    return _containment.tool_targets_outside_root(tool_name, tool_input, root, cwd)
 
 
 # ---------------------------------------------------------------------------
@@ -541,11 +566,48 @@ def main() -> None:
             return
 
         # --------------------------------------------------------------
-        # Session ID — look up from sessions table by workspace key.
-        # Falls back to workspace_root string if lookup fails or value
-        # is invalid (corrupt session).
+        # Guard: the target must be inside the project root.  Nothing outside
+        # it (~/.ssh/config, /etc/hosts, another repo) may reach the shared
+        # workspace -- no API call, no cache entry.  Resolution follows
+        # symlinks and collapses `..` first.  The root is CLAUDE_PROJECT_DIR
+        # (stable across `cd`) and relative targets resolve against the
+        # session cwd from the hook event -- NOT `workspace_root` above, which
+        # is the hook process's cwd and follows `cd`.  See pyhooks/containment.py.
         # --------------------------------------------------------------
-        session_id: str = workspace_root  # default / fallback
+        project_root = _containment.project_root()
+        if _containment.project_root_is_fallback():
+            # CLAUDE_PROJECT_DIR unset: the root is the process cwd, which
+            # follows `cd`, so containment is only as strong as that cwd.
+            _trace_mod.write(conn, "preload_context", "project_root_fallback_cwd")
+
+        # The API key was read from the process cwd's .neuroloom.db.  If that
+        # is not the project root (a `cd` into a sibling or nested project with
+        # its own key), sending this project's paths with that key would hit
+        # the wrong workspace -- fail closed.
+        if not _containment.credential_matches_root(cfg.state_db_path, project_root):
+            _trace_mod.write(conn, "preload_context", "credential_root_mismatch")
+            print(json.dumps({}))
+            return
+
+        if _targets_outside_project(
+            tool_name,
+            tool_input,
+            _cmd,
+            project_root,
+            _containment.session_cwd(hook_input),
+        ):
+            _trace_mod.write(conn, "preload_context", "outside_project")
+            print(json.dumps({}))
+            return
+
+        # --------------------------------------------------------------
+        # Session ID — look up from sessions table by workspace key.
+        # None if the lookup fails or the stored value is invalid (corrupt
+        # session): only a value matching _SESSION_ID_RE is ever sent to the
+        # API.  The local token budget still needs *a* key, so it falls back to
+        # workspace_root -- a local-only SQLite key that is never transmitted.
+        # --------------------------------------------------------------
+        session_id: str | None = None
         if conn is not None:
             try:
                 row = conn.execute(
@@ -680,7 +742,9 @@ def main() -> None:
         # --------------------------------------------------------------
         # Token budget check — BEFORE constructing output
         # --------------------------------------------------------------
-        if conn is not None and not _budget_check_and_update(conn, session_id, injection_text):
+        if conn is not None and not _budget_check_and_update(
+            conn, session_id or workspace_root, injection_text
+        ):
             _trace_mod.write(conn, "preload_context", "budget_exhausted")
             print(json.dumps({}))
             return
