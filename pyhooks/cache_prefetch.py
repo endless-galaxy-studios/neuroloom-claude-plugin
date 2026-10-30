@@ -174,6 +174,11 @@ def main() -> None:
     # ------------------------------------------------------------------ 1
     cfg: Config = load()
 
+    # CI mode: this hook does no work (no debounce state, no thread, no
+    # network).  Exit before reading stdin or opening the database.
+    if cfg.ci_mode:
+        sys.exit(0)
+
     # ------------------------------------------------------------------ 2
     # No API key → nothing useful to do; skip even opening the DB.
     if not cfg.api_key:

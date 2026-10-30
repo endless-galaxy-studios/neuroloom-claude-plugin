@@ -10,6 +10,14 @@ module with all remaining arguments forwarded. On POSIX the current process is
 replaced via os.execve; on Windows a subprocess is spawned and its exit code is
 forwarded.
 
+CI mode (NEUROLOOM_MODE parses as CI, same rule as pyhooks.config): the hook runs
+under sys.executable (no venv lookup, no degraded-venv line) and is started with
+``python -I -c BOOTSTRAP`` instead of ``python -m``. In CI the working directory
+is the checkout, which may be attacker-controlled; ``-m`` would put it first on
+sys.path and import a planted pyhooks/, json.py or runpy.py. ``-I`` keeps the
+working directory and PYTHONPATH off sys.path, and the bootstrap sets it to
+exactly the plugin root. This launcher imports nothing from its own package.
+
 When the venv is absent a single degraded-state warning is written to stderr,
 but ONLY when the module being dispatched is pyhooks.session_start. This gates
 the message to one occurrence per session and prevents 71x per-hook spam.
@@ -21,11 +29,29 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 
+# Runs under `python -I -c`: sys.argv[0] is '-c' and sys.argv[1:] is
+# [plugin_root, module, *hook_args].
+_CI_BOOTSTRAP = (
+    "import sys, runpy\n"
+    "root, mod = sys.argv[1:3]\n"
+    "sys.path[:0] = [root]\n"
+    "sys.argv = [mod] + sys.argv[3:]\n"
+    "runpy.run_module(mod, run_name='__main__', alter_sys=True)\n"
+)
+
+
+def _ci_mode() -> bool:
+    """True when NEUROLOOM_MODE parses as CI (unset/blank: normal; "ci": CI;
+    any other value fails closed into CI). Tiny copy of the shared parse rule,
+    because the launcher cannot import pyhooks before choosing an interpreter."""
+    return (os.environ.get("NEUROLOOM_MODE") or "").strip().lower() != ""
+
 
 def _resolve_python() -> tuple[Path, bool]:
     """Return (interpreter_path, is_degraded).
 
     Venv resolution order:
+    0. CI mode                       — sys.executable, never degraded (FR-D7)
     1. ${CLAUDE_PLUGIN_DATA}/.venv  — persistent across plugin version bumps (CC v2.1.78+)
     2. PLUGIN_ROOT / ".venv"        — dev-mode fallback (no CLAUDE_PLUGIN_DATA set)
     3. sys.executable               — degraded, no venv found anywhere
@@ -33,6 +59,9 @@ def _resolve_python() -> tuple[Path, bool]:
     Note: on first install, CLAUDE_PLUGIN_DATA exists but .venv has not been created
     yet; the venv_py.exists() check handles this by falling through to the next tier.
     """
+    if _ci_mode():
+        return Path(sys.executable), False  # D-10: no venv lookup in CI mode
+
     suffix = "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
 
     data_dir = os.environ.get("CLAUDE_PLUGIN_DATA")
@@ -64,13 +93,19 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
 
-    args = [str(py), "-m", module] + sys.argv[2:]
-
-    # Add the plugin root to PYTHONPATH so `python -m pyhooks.*` resolves
-    # without needing pyhooks installed as a package in the venv.
     env = os.environ.copy()
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(PLUGIN_ROOT) + (os.pathsep + existing if existing else "")
+    if _ci_mode():
+        args = [str(py), "-I", "-c", _CI_BOOTSTRAP, str(PLUGIN_ROOT), module] + sys.argv[2:]
+        # -I makes the interpreter ignore PYTHON* variables, so this is inert for
+        # the CI child; the bootstrap's sys.path insert is the real control.
+        env["PYTHONPATH"] = str(PLUGIN_ROOT)
+    else:
+        args = [str(py), "-m", module] + sys.argv[2:]
+
+        # Add the plugin root to PYTHONPATH so `python -m pyhooks.*` resolves
+        # without needing pyhooks installed as a package in the venv.
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(PLUGIN_ROOT) + (os.pathsep + existing if existing else "")
 
     if sys.platform == "win32":
         import subprocess

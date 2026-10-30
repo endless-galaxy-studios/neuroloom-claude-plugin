@@ -233,6 +233,11 @@ def main() -> None:
 
     # 1. Load config
     config = _config.load()
+
+    # CI mode: this hook does no work (no debounce state, no thread, no
+    # network).  Exit before reading stdin or opening the database.
+    if config.ci_mode:
+        sys.exit(0)
     if not config.api_key:
         sys.exit(0)
 

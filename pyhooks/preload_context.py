@@ -410,19 +410,26 @@ def _budget_check_and_update(
 # API call
 # ---------------------------------------------------------------------------
 
+# Fetch timeouts (seconds).  Normal mode is tight because the hook sits in the
+# critical path before Claude reads a file: better to inject nothing than make
+# the user wait.  CI has no human waiting and runners are slower to reach the
+# API, so it gets a longer patience window.
+_FETCH_TIMEOUT_CI_S = 10.0
+_FETCH_TIMEOUT_NORMAL_S = 3.0
+
 
 def _fetch_context(
     api_base: str,
     api_key: str,
     file_path: str,
-    timeout: float = 3.0,
+    timeout: float = _FETCH_TIMEOUT_NORMAL_S,
     fmt: str = "inject",
     query: str | None = None,
     session_id: str | None = None,
 ) -> tuple[str, int] | None:
     """POST to /api/v1/context and return (text, ttl_seconds), or None on failure.
 
-    The 3-second timeout is intentionally tight: PreToolUse hooks fire in the
+    The normal-mode 3-second timeout is intentionally tight: PreToolUse hooks fire in the
     critical path before Claude reads a file.  If the API takes longer than 3
     seconds, Claude's entire response is delayed — so we prefer injecting
     nothing over making the user wait.
@@ -496,6 +503,12 @@ def main() -> None:
     # Load config (never raises)
     # ------------------------------------------------------------------
     cfg = _config_mod.load()
+
+    # CI mode with no key is dormant: print {} before the state database is
+    # opened, so the hook creates no file in a checkout that has none.
+    if cfg.ci_mode and not cfg.api_key:
+        print(json.dumps({}))
+        return
 
     # ------------------------------------------------------------------
     # Open the shared state DB (non-fatal if unavailable)
@@ -698,8 +711,11 @@ def main() -> None:
                     cfg.api_key,
                     api_file_path,
                     fmt=mode,
+                    timeout=_FETCH_TIMEOUT_CI_S if cfg.ci_mode else _FETCH_TIMEOUT_NORMAL_S,
                     query=extracted_query if mode == "nudge" else None,
-                    session_id=session_id,
+                    # CI sends no session id; the minted id stays local for the
+                    # token budget below.
+                    session_id=None if cfg.ci_mode else session_id,
                 )
             except (TimeoutError, urllib.error.URLError):
                 # Network-level failure — trip the circuit breaker

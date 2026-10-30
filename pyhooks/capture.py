@@ -149,6 +149,92 @@ def _truncate_payload_fields(data: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _buffer_observation(conn: sqlite3.Connection, observation_json: str) -> None:
+    """
+    Insert one observation row into ``event_buffer`` and enforce the row cap.
+
+    Think of the buffer as a fixed-size mailbox: once more than ``_BUFFER_MAX``
+    letters are inside, the oldest are thrown out until ``_BUFFER_TRIM_TARGET``
+    remain.  Errors propagate; each caller owns its own ``buffer_error`` handling.
+    """
+    conn.execute(
+        "INSERT INTO event_buffer (payload, created_at, payload_type) VALUES (?, ?, ?)",
+        (observation_json, time.time(), "observation"),
+    )
+    conn.commit()
+
+    row = conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()
+    if row is not None and int(row[0]) > _BUFFER_MAX:
+        conn.execute(
+            "DELETE FROM event_buffer WHERE id NOT IN ("
+            "SELECT id FROM event_buffer ORDER BY id DESC LIMIT "
+            + str(_BUFFER_TRIM_TARGET)
+            + ")"
+        )
+        conn.commit()
+
+
+# CI-mode rows are never uploaded and the row-count cap has no byte limit, so
+# one huge Bash command + output could otherwise become a multi-megabyte row.
+# The serialized row (JSON text) is held to this many bytes.
+_CI_ROW_MAX_BYTES = 64 * 1024
+
+
+def _ci_row_json(obs: dict[str, object]) -> str:
+    """Serialize a CI observation, cutting ``content`` so the row fits _CI_ROW_MAX_BYTES.
+
+    The result is always valid JSON of the usual shape: ``content`` stays a
+    string, ending in a marker that records the original length when cut.
+    """
+    row = json.dumps(obs, separators=(",", ":"))
+    if len(row) <= _CI_ROW_MAX_BYTES:  # ensure_ascii output: chars == bytes
+        return row
+    content = str(obs["content"])
+    original = len(content)
+    marker = f"…[truncated: original {original} chars]"
+    category = obs.get("category")
+    capped = dict(obs)
+    if isinstance(category, str):
+        capped["category"] = category[:256]
+    keep = original
+    for _ in range(12):
+        # Escaping can inflate content (quotes, non-ASCII), so shrink in
+        # proportion to the overshoot and re-measure.
+        keep = min(keep - 1, int(keep * _CI_ROW_MAX_BYTES / len(row) * 0.9))
+        keep = max(keep, 0)
+        capped["content"] = content[:keep] + marker
+        row = json.dumps(capped, separators=(",", ":"))
+        if len(row) <= _CI_ROW_MAX_BYTES or keep == 0:
+            break
+    if len(row) > _CI_ROW_MAX_BYTES:  # loop exhausted: guarantee the cap with the marker alone
+        capped["content"] = marker
+        row = json.dumps(capped, separators=(",", ":"))
+    return row
+
+
+def _build_observation(
+    data: dict[str, object],
+    session_id: str,
+    tool_name: str,
+    agent_id: str | None,
+    agent_type: str | None,
+) -> dict[str, object]:
+    """Build the single-observation dict from a parsed event (truncates in place)."""
+    observation_id = str(uuid.uuid4())
+    observed_at = datetime.now(timezone.utc).isoformat()
+    _truncate_payload_fields(data)
+    content_str = json.dumps(data, separators=(",", ":"))
+    return {
+        "observation_id": observation_id,
+        "session_id": session_id,
+        "observed_at": observed_at,
+        "category": tool_name,
+        "content": content_str,
+        "agent_id": agent_id,
+        "agent_type": agent_type,
+    }
+
+
 def _submit(
     db_path: Path,
     api_base: str,
@@ -185,22 +271,7 @@ def _submit(
             trace.write(conn, _SCRIPT, "api_errored", detail=status_detail)
 
         if conn is not None:
-            conn.execute(
-                "INSERT INTO event_buffer (payload, created_at, payload_type) VALUES (?, ?, ?)",
-                (single_obs_json, time.time(), "observation"),
-            )
-            conn.commit()
-
-            # Enforce the row cap: trim to _BUFFER_TRIM_TARGET if over _BUFFER_MAX.
-            row = conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()
-            if row is not None and int(row[0]) > _BUFFER_MAX:
-                conn.execute(
-                    "DELETE FROM event_buffer WHERE id NOT IN ("
-                    "SELECT id FROM event_buffer ORDER BY id DESC LIMIT "
-                    + str(_BUFFER_TRIM_TARGET)
-                    + ")"
-                )
-                conn.commit()
+            _buffer_observation(conn, single_obs_json)
 
     except Exception:
         # Background thread must never propagate — the join() in main already
@@ -296,6 +367,8 @@ def main() -> None:
 
         # -------------------------------------------------------------- 7
         tool_name: str = str(data.get("tool_name") or data.get("name") or "unknown")
+        # Bound once: every trace/observation below sees the cut value.
+        tool_name = tool_name[:256]
 
         # -------------------------------------------------------------- 8
         if _MCP_TOOL_RE.match(tool_name):
@@ -332,6 +405,20 @@ def main() -> None:
             sys.exit(0)
 
         # -------------------------------------------------------------- 9
+        # CI mode: no throttle, no thread, no network.  The row is written
+        # synchronously (the process may be torn down right after the hook
+        # returns, so there is nothing to hand off to).  It is a local record
+        # only: nothing reads or uploads it in CI mode, and the factory deletes
+        # the db after the job.  Branches before the last_submit_ms update.
+        if config.ci_mode:
+            ci_obs = _build_observation(data, session_id, tool_name, agent_id, agent_type)
+            try:
+                _buffer_observation(conn, _ci_row_json(ci_obs))
+                trace.write(conn, _SCRIPT, "ci_recorded", session_id=session_id, tool_name=tool_name)
+            except Exception:
+                trace.write(conn, _SCRIPT, "buffer_error")  # trace.write swallows its own errors
+            return
+
         now_ms = int(time.time() * 1000)
         if now_ms - last_submit_ms < _RATE_LIMIT_MS:
             trace.write(
@@ -344,20 +431,7 @@ def main() -> None:
             sys.exit(0)
 
         # -------------------------------------------------------------- 10
-        observation_id = str(uuid.uuid4())
-        observed_at = datetime.now(timezone.utc).isoformat()
-        _truncate_payload_fields(data)
-        content_str = json.dumps(data, separators=(",", ":"))
-
-        single_obs: dict[str, object] = {
-            "observation_id": observation_id,
-            "session_id": session_id,
-            "observed_at": observed_at,
-            "category": tool_name,
-            "content": content_str,
-            "agent_id": agent_id,
-            "agent_type": agent_type,
-        }
+        single_obs = _build_observation(data, session_id, tool_name, agent_id, agent_type)
         batch_payload: dict[str, object] = {"observations": [single_obs]}
 
         # -------------------------------------------------------------- 11

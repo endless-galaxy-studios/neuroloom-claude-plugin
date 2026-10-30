@@ -397,36 +397,30 @@ class TestEventBufferCap:
         conn = _db_mod.open_db(db_path)
         assert conn is not None
         try:
-            # Seed > 10,000 rows directly
+            # Seed exactly the cap (10,000 rows) directly
             now = time.time()
             conn.executemany(
                 "INSERT INTO event_buffer (payload, created_at) VALUES (?, ?)",
-                [(f'{{"n":{i}}}', now - i) for i in range(10_100)],
+                [(f'{{"n":{i}}}', now - i) for i in range(10_000)],
             )
             conn.commit()
 
             count_before = conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
-            assert count_before == 10_100
+            assert count_before == _capture_mod._BUFFER_MAX == 10_000
 
-            # Simulate the trim logic from _submit (runs in the background thread
-            # after a failed POST).
-            if count_before > _capture_mod._BUFFER_MAX:
-                conn.execute(
-                    f"""
-                    DELETE FROM event_buffer
-                    WHERE id NOT IN (
-                        SELECT id FROM event_buffer
-                        ORDER BY id DESC
-                        LIMIT {_capture_mod._BUFFER_TRIM_TARGET}
-                    )
-                    """
-                )
-                conn.commit()
+            # One more row through the real helper pushes the buffer over the
+            # cap, which must trim it back to the target.
+            _capture_mod._buffer_observation(conn, '{"new":true}')
 
             count_after = conn.execute("SELECT COUNT(*) FROM event_buffer").fetchone()[0]
             assert count_after == _capture_mod._BUFFER_TRIM_TARGET, (
                 f"Expected {_capture_mod._BUFFER_TRIM_TARGET} rows after trim, got {count_after}"
             )
+            newest = conn.execute(
+                "SELECT payload, payload_type FROM event_buffer ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert newest["payload"] == '{"new":true}', "the newly inserted row must survive the trim"
+            assert newest["payload_type"] == "observation", "helper rows carry payload_type='observation'"
         finally:
             conn.close()
 

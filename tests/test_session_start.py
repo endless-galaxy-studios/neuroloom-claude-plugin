@@ -767,12 +767,40 @@ class TestGitignoreManagement:
         assert "*.log" in content
 
     def test_gitignore_not_duplicated(self, tmp_path: Path) -> None:
+        # FR-G1 (D178d): the covered entry is the exact line ``.neuroloom.db*``
+        # (db plus -wal and -shm).  Count exact lines, not substrings: the bare
+        # name is a substring of the starred one.
+        gi = tmp_path / ".gitignore"
+        gi.write_text(".neuroloom.db*\n")
+        _ss_mod._ensure_gitignore(str(tmp_path))
+        _ss_mod._ensure_gitignore(str(tmp_path))
+        lines = gi.read_text().splitlines()
+        assert lines.count(".neuroloom.db*") == 1, "FR-G1: starred entry should appear exactly once"
+        assert lines == [".neuroloom.db*"], "FR-G1: a file already covered must be left untouched"
+
+    def test_gitignore_created_with_starred_entry_only(self, tmp_path: Path) -> None:
+        _ss_mod._ensure_gitignore(str(tmp_path))
+        gi = tmp_path / ".gitignore"
+        assert gi.read_text() == ".neuroloom.db*\n", "FR-G1: a new .gitignore holds just the starred entry"
+
+    def test_gitignore_with_only_bare_entry_gets_starred_entry_once(self, tmp_path: Path) -> None:
+        # A bare ``.neuroloom.db`` does not cover the -wal and -shm sidecars, so
+        # the project is not "covered": the starred line is appended, once.
         gi = tmp_path / ".gitignore"
         gi.write_text(".neuroloom.db\n")
         _ss_mod._ensure_gitignore(str(tmp_path))
         _ss_mod._ensure_gitignore(str(tmp_path))
-        count = gi.read_text().count(".neuroloom.db")
-        assert count == 1, "Entry should appear exactly once"
+        assert gi.read_text().splitlines() == [".neuroloom.db", ".neuroloom.db*"], (
+            "FR-G1: bare-only .gitignore must gain exactly one starred line"
+        )
+
+    def test_gitignore_missing_trailing_newline_still_appends_cleanly(self, tmp_path: Path) -> None:
+        gi = tmp_path / ".gitignore"
+        gi.write_text("*.log")
+        _ss_mod._ensure_gitignore(str(tmp_path))
+        assert gi.read_text().splitlines() == ["*.log", ".neuroloom.db*"], (
+            "FR-G1: starred entry must land on its own line"
+        )
 
 
 class TestDormantCapture:

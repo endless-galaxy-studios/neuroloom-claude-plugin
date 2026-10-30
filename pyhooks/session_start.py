@@ -58,6 +58,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pyhooks.config as _config
@@ -543,6 +544,30 @@ def _end_stale_session(
     conn.commit()
 
 
+def _mint_session_id() -> str:
+    """Mint a local session id: ``sess-<epoch seconds>-<8 hex>``.
+
+    Shared by the normal path and the CI path so the format capture validates
+    cannot drift between them.
+    """
+    return f"sess-{int(time.time())}-{secrets.token_hex(4)}"
+
+
+def _upsert_session(conn: sqlite3.Connection, workspace_key: str, sid: str) -> None:
+    """Insert or replace the ``sessions`` row for *workspace_key*. Does not commit."""
+    conn.execute(
+        """
+        INSERT INTO sessions (session_key, session_id, started_at, last_submit_ms)
+        VALUES (?, ?, datetime('now'), 0)
+        ON CONFLICT(session_key) DO UPDATE SET
+            session_id     = excluded.session_id,
+            started_at     = excluded.started_at,
+            last_submit_ms = 0
+        """,
+        (workspace_key, sid),
+    )
+
+
 def _start_new_session(
     conn: sqlite3.Connection,
     api_base: str,
@@ -557,7 +582,7 @@ def _start_new_session(
     On success the session row is persisted to the DB so downstream hooks can
     reference it.
     """
-    sid = f"sess-{int(time.time())}-{secrets.token_hex(4)}"
+    sid = _mint_session_id()
     branch = _git_branch(root)
     project_name = Path(root).name
 
@@ -582,17 +607,7 @@ def _start_new_session(
         return None
 
     # Persist the new session so hooks that run later in this session can read it.
-    conn.execute(
-        """
-        INSERT INTO sessions (session_key, session_id, started_at, last_submit_ms)
-        VALUES (?, ?, datetime('now'), 0)
-        ON CONFLICT(session_key) DO UPDATE SET
-            session_id     = excluded.session_id,
-            started_at     = excluded.started_at,
-            last_submit_ms = 0
-        """,
-        (workspace_key, sid),
-    )
+    _upsert_session(conn, workspace_key, sid)
     conn.commit()
     return sid
 
@@ -823,14 +838,15 @@ def _flush_event_buffer(
 
 def _ensure_gitignore(project_root: str) -> None:
     """
-    Step 2a — add ``.neuroloom.db`` to ``.gitignore`` if not already present.
+    Step 2a — add ``.neuroloom.db*`` to ``.gitignore`` if not already present.
 
-    Idempotent: if the entry already exists (even inside a comment or with
-    surrounding whitespace) we leave the file untouched.
+    The star covers the database and its ``-wal`` and ``-shm`` sidecars. The
+    project counts as covered only when that exact line is present (a bare
+    ``.neuroloom.db`` does not cover the sidecars). Idempotent.
     """
     gitignore_path = Path(project_root) / ".gitignore"
 
-    entry = ".neuroloom.db"
+    entry = ".neuroloom.db*"
 
     if gitignore_path.exists():
         content = gitignore_path.read_text(encoding="utf-8")
@@ -872,6 +888,93 @@ def _inject_claudemd(project_root: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Spec section 5.6: the CI-mode stdout lines are a stable contract. None names a
+# path, a slash command or the key.
+_CI_READY_LINE = "[Neuroloom CI mode] Ready. Memory lookups are on; observations are not uploaded."
+_CI_DORMANT_LINE = "[Neuroloom CI mode] No project key was seeded, so Neuroloom is off for this job."
+_CI_UNOPENABLE_LINE = (
+    "[Neuroloom CI mode] The project state could not be opened, so observations are not recorded."
+)
+
+# NEUROLOOM_MODE values echoed verbatim in the unrecognised-mode stderr line.
+_MODE_ECHO_RE = re.compile(r"[A-Za-z0-9_-]{1,16}")
+
+
+def _ci_status_line(key_present: bool, state_ready: bool) -> str:
+    """Pure decision: which CI-mode line to print.
+
+    *state_ready* means the database opened and the session row and trace row
+    were written. No key is always dormant, whatever else is true.
+    """
+    if not key_present:
+        return _CI_DORMANT_LINE
+    if not state_ready:
+        return _CI_UNOPENABLE_LINE
+    return _CI_READY_LINE
+
+
+def _warn_unrecognised_mode() -> None:
+    """One stderr line naming an unrecognised ``NEUROLOOM_MODE`` (CI is still on)."""
+    raw = os.environ.get("NEUROLOOM_MODE")
+    if _config.parse_mode(raw).recognised:
+        return
+    value = (raw or "").strip()  # mode parsing strips first, so echo what it saw
+    # A secret placed here by mistake must not print: echo only short,
+    # identifier-shaped values (every spec 6.2 input qualifies).
+    if _MODE_ECHO_RE.fullmatch(value):
+        shown = json.dumps(value)
+    else:
+        shown = f"<redacted, {len(value)} chars>"
+    try:
+        print(
+            f"[Neuroloom] NEUROLOOM_MODE {shown} is not recognised; running in CI mode. "
+            "Set NEUROLOOM_MODE=ci, or unset it for normal mode.",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
+def _record_ci_session(cfg: _config.Config) -> bool:
+    """Open the state db, write the session row and one trace row. True on success.
+
+    Every failure (open, project root, upsert, trace insert, commit) returns
+    False; nothing raises. The session and trace rows commit together.
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _db.open_db(cfg.state_db_path)
+        if conn is None:
+            return False
+        root = str(_containment.project_root())
+        sid = _mint_session_id()
+        _upsert_session(conn, root, sid)
+        # Direct insert, not trace.write: that helper swallows its own errors,
+        # and a lost trace row must be reported as "could not record".
+        conn.execute(
+            "INSERT INTO traces (ts, script, decision, session_id) VALUES (?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), _SCRIPT, "ci_started", sid),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _main_ci(cfg: _config.Config) -> None:
+    """FR-D1: the CI-mode SessionStart. No network, thread, subprocess or tracked-file edit."""
+    key_present = bool(cfg.api_key)
+    # No key: print and return before any database is opened.
+    ready = _record_ci_session(cfg) if key_present else False
+    print(_ci_status_line(key_present, ready))
+
+
 def main() -> None:
     """
     Run the SessionStart hook.
@@ -883,6 +986,11 @@ def main() -> None:
     """
     # Step 1 — load config.
     cfg = _config.load()
+
+    if cfg.ci_mode:
+        _warn_unrecognised_mode()
+        _main_ci(cfg)
+        return
 
     # Step 2 — open DB.
     conn = _db.open_db(cfg.state_db_path)
