@@ -72,7 +72,6 @@ def _make_config(db_path: Path) -> _config_mod.Config:
         api_key="perf-test-key",
         api_base="http://127.0.0.1:19999",
         state_db_path=db_path,
-        debug=False,
     )
 
 
@@ -124,7 +123,7 @@ class TestCapturePerformance:
         monkeypatch.chdir(tmp_path)
         cfg = _make_config(db_path)
 
-        stdin_data = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "/p/f.py"}})
+        stdin_data = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "f.py")}})
 
         with (
             patch("pyhooks.capture.load", return_value=cfg),
@@ -163,7 +162,7 @@ class TestPreloadContextPerformance:
         cfg = _make_config(db_path)
 
         stdin_data = json.dumps(
-            {"tool_name": "Read", "tool_input": {"file_path": "/project/api.py"}}
+            {"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / "api.py")}}
         )
 
         # Circuit breaker is tripped → no API call → fast path
@@ -194,7 +193,7 @@ class TestPreloadContextPerformance:
         cfg = _make_config(db_path)
 
         workspace_root = str(tmp_path.resolve())
-        file_path = "/project/fast.py"
+        file_path = str(tmp_path / "fast.py")
         cache_key = _pc_mod._cache_key(file_path, workspace_root)
 
         conn = _db_mod.open_db(db_path)

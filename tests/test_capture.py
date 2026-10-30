@@ -8,6 +8,7 @@ fallback, and buffer-cap trimming.  Network calls are mocked via
 
 import io
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -48,7 +49,13 @@ def _seed_session(
 
 def _make_event(tool_name: str = "Write", extra: dict[str, Any] | None = None) -> str:
     """Return a JSON-encoded tool event as Claude Code would supply on stdin."""
-    payload: dict[str, Any] = {"tool_name": tool_name, "tool_input": {"file_path": "/tmp/x.py"}}
+    # The fixture target must sit inside the project root. Every caller chdirs
+    # into its tmp_path first and CLAUDE_PROJECT_DIR is unset, so the root is the
+    # cwd; an out-of-root path would be dropped as ``outside_project`` (D178e).
+    payload: dict[str, Any] = {
+        "tool_name": tool_name,
+        "tool_input": {"file_path": os.path.join(os.getcwd(), "x.py")},
+    }
     if extra:
         payload.update(extra)
     return json.dumps(payload)
@@ -85,7 +92,6 @@ def _run_capture(
             api_key=api_key,
             api_base="http://localhost:19999",
             state_db_path=db_path,
-            debug=False,
         )
         mock_open_db.side_effect = _real_open_db
 
@@ -240,7 +246,6 @@ class TestObservationPayload:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
 
@@ -299,7 +304,6 @@ class TestEventBuffer:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
 
@@ -447,7 +451,6 @@ class TestNoApiKey:
                 api_key="",
                 api_base="http://localhost:19999",
                 state_db_path=tmp_path / ".neuroloom.db",
-                debug=False,
             )
             mock_open_db.side_effect = lambda path: open_db_calls.append(path)
 

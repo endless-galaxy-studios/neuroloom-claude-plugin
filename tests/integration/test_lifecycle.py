@@ -148,7 +148,7 @@ class TestFullLifecycle:
         _run_session_start(integration_config, tmp_path, monkeypatch, mock_server)
         mock_server.requests.clear()
 
-        stdin_data = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "/p/f.py"}})
+        stdin_data = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "f.py")}})
         _run_capture_with_event(
             integration_config,
             tmp_path,
@@ -181,7 +181,7 @@ class TestFullLifecycle:
         )
         _run_session_start(integration_config, tmp_path, monkeypatch, mock_server)
 
-        stdin_data = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "/p/f.py"}})
+        stdin_data = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "f.py")}})
         _run_capture_with_event(
             integration_config,
             tmp_path,
@@ -217,9 +217,24 @@ class TestFullLifecycle:
         # Manually seed a buffered event
         conn = _db_mod.open_db(integration_db)
         assert conn is not None
+        # Typed, shape-valid observation row: the flush routes by payload_type.
         conn.execute(
-            "INSERT INTO event_buffer (payload, created_at) VALUES (?, ?)",
-            ('{"buffered":"event"}', time.time()),
+            "INSERT INTO event_buffer (payload, created_at, payload_type) VALUES (?, ?, ?)",
+            (
+                json.dumps(
+                    {
+                        "observation_id": "obs-buffered",
+                        "session_id": "sess-ok",
+                        "observed_at": "2026-07-10T00:00:00+00:00",
+                        "category": "Write",
+                        "content": "{}",
+                        "agent_id": None,
+                        "agent_type": None,
+                    }
+                ),
+                time.time(),
+                "observation",
+            ),
         )
         conn.commit()
         conn.close()
@@ -265,7 +280,7 @@ class TestFullLifecycle:
 
         monkeypatch.chdir(tmp_path)
         stdin_data = json.dumps(
-            {"tool_name": "Read", "tool_input": {"file_path": "/project/api.py"}}
+            {"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / "api.py")}}
         )
         output = io.StringIO()
 

@@ -8,6 +8,7 @@ session handling.
 
 import io
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -67,6 +68,7 @@ def _run_preload(
         timeout: float = 3.0,
         fmt: str = "inject",
         query: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, int] | None:
         if raise_on_fetch is not None:
             raise raise_on_fetch
@@ -85,7 +87,6 @@ def _run_preload(
             api_key=api_key,
             api_base="http://localhost:19999",
             state_db_path=db_path,
-            debug=False,
         )
         mock_open_db.side_effect = _real_open_db
         _pc_mod.main()
@@ -93,8 +94,25 @@ def _run_preload(
     return output.getvalue()
 
 
-def _inject_event(file_path: str = "/project/api.py") -> str:
-    return json.dumps({"tool_name": "Read", "tool_input": {"file_path": file_path}})
+def _in_root(name: str) -> str:
+    """Return an absolute path for *name* inside the test's project root.
+
+    The autouse ``_project_root`` fixture makes the root the test's tmp_path
+    (both ``CLAUDE_PROJECT_DIR`` and the cwd).  A fixture path outside it, such
+    as ``/project/api.py``, is dropped as ``outside_project`` (D178e).
+    """
+    return os.path.join(os.getcwd(), name)
+
+
+@pytest.fixture(autouse=True)
+def _project_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+
+def _inject_event(file_path: str | None = None) -> str:
+    target = file_path if file_path is not None else _in_root("api.py")
+    return json.dumps({"tool_name": "Read", "tool_input": {"file_path": target}})
 
 
 def _nudge_event(tool_name: str = "Grep", pattern: str = "def auth_handler") -> str:
@@ -122,7 +140,7 @@ class TestInjectMode:
             monkeypatch,
             tmp_path,
             db_path,
-            _inject_event("/project/api.py"),
+            _inject_event(_in_root("api.py")),
             fetch_return=("Memory context for api.py", 300),
         )
         out = json.loads(stdout)
@@ -247,7 +265,6 @@ class TestCircuitBreaker:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _pc_mod.main()
@@ -266,7 +283,7 @@ class TestCacheHit:
         assert conn is not None
 
         workspace_root = str(tmp_path.resolve())
-        file_path = "/project/api.py"
+        file_path = _in_root("api.py")
         cache_key = _pc_mod._cache_key(file_path, workspace_root)
 
         # Pre-seed the cache
@@ -300,7 +317,6 @@ class TestCacheHit:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _pc_mod.main()
@@ -322,7 +338,7 @@ class TestCacheTtl:
         assert conn is not None
 
         workspace_root = str(tmp_path.resolve())
-        file_path = "/project/old.py"
+        file_path = _in_root("old.py")
         cache_key = _pc_mod._cache_key(file_path, workspace_root)
 
         # Seed a cache entry that is more than 3600 seconds old
@@ -357,7 +373,6 @@ class TestCacheTtl:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _pc_mod.main()
@@ -416,7 +431,7 @@ class TestEmptyResponseNotCached:
             monkeypatch,
             tmp_path,
             db_path,
-            _inject_event("/project/empty.py"),
+            _inject_event(_in_root("empty.py")),
             fetch_return=("", 300),
         )
 

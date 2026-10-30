@@ -39,7 +39,6 @@ def _make_config(db_path: Path, api_base: str = "http://localhost:19999") -> Any
         api_key="test-key-abc123",
         api_base=api_base,
         state_db_path=db_path,
-        debug=False,
     )
 
 
@@ -92,7 +91,6 @@ def _run_session_start(
             api_key=api_key,
             api_base="http://localhost:19999",
             state_db_path=db_path,
-            debug=False,
         )
         mock_open_db.side_effect = _real_open_db
 
@@ -222,7 +220,6 @@ class TestStaleSession:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
@@ -275,7 +272,6 @@ class TestCorruptStaleSession:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
@@ -331,7 +327,6 @@ class TestSessionStartFailure:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
@@ -370,7 +365,6 @@ class TestSessionIdFormat:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
@@ -396,12 +390,10 @@ class TestEventBufferFlush:
         conn = _db_mod.open_db(db_path)
         assert conn is not None
 
-        now = time.time()
-        conn.executemany(
-            "INSERT INTO event_buffer (payload, created_at) VALUES (?, ?)",
-            [(f'{{"n":{i}}}', now - i) for i in range(5)],
-        )
-        conn.commit()
+        # Typed, shape-valid observation rows: the flush routes by payload_type
+        # and leaves unclassifiable rows (such as {"n": 0}) in the buffer.
+        for i in range(5):
+            _seed_buffer_row(conn, _observation_payload(i), "observation")
         conn.close()
 
         flush_calls: list[str] = []
@@ -430,7 +422,6 @@ class TestEventBufferFlush:
                 api_key="test-key",
                 api_base="http://localhost:19999",
                 state_db_path=db_path,
-                debug=False,
             )
             mock_open_db.side_effect = _real_open_db
             _ss_mod.main()
@@ -885,10 +876,10 @@ class TestDormantCapture:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """D171 round 8, MAJOR-7 -- an earlier revision's version copied
-        test_no_key_message_printed's Config(..., debug=False) construction,
-        the exact broken fixture pattern causing most of the pre-existing
-        baseline failures, and never actually exercised the try/except wrap
-        it claimed to verify."""
+        test_no_key_message_printed's Config construction (which at the time
+        passed a ``debug`` keyword ``Config`` never had; removed in D178d
+        Phase 1), and never actually exercised the try/except wrap it
+        claimed to verify."""
         db_path = tmp_path / ".neuroloom.db"
         monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_API_KEY", raising=False)
         monkeypatch.chdir(tmp_path)

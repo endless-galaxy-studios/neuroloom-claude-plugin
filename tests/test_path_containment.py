@@ -33,10 +33,11 @@ Layout used by the fixtures (all under pytest's ``tmp_path``)::
             secret.py
 
 The existing ``_run_preload`` helper in test_preload_context.py is deliberately
-not reused: it builds ``Config(..., debug=False)``, which raises TypeError (the
-cause of that file's baseline failures in known_failures.txt), and its fake
-``_fetch_context`` lacks the ``session_id`` parameter the hook passes, so a
-skip test built on it would pass vacuously.
+not reused: this module builds its own hook-level harness so each skip test
+asserts positively (a request did or did not reach the recording server)
+instead of relying on a fake fetch that can pass vacuously. (Historical note:
+the helper once built ``Config`` with a ``debug`` keyword that ``Config`` never
+had; D178d Phase 1 removed it.)
 """
 
 import glob

@@ -55,7 +55,6 @@ def _run_cgs(
             api_key=api_key,
             api_base="http://localhost:19999",
             state_db_path=db_path,
-            debug=False,
         )
         mock_open_db.side_effect = _real_open_db
 

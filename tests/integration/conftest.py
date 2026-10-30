@@ -126,5 +126,4 @@ def integration_config(integration_db: Path, mock_server: RecordingServer) -> _c
         api_key="integration-test-key",
         api_base=mock_server.base_url,  # type: ignore[attr-defined]
         state_db_path=integration_db,
-        debug=False,
     )

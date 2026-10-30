@@ -7,12 +7,15 @@ state.  The `db_path` fixture always uses `tmp_path` (a real file) rather than
 are exercised under realistic conditions.
 """
 
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 import pyhooks.config as _config_mod
 import pyhooks.db as _db_mod
+from tests import ci_support
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +28,70 @@ def _no_ambient_project_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     explicitly, after this fixture has cleared it.
     """
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove NEUROLOOM_MODE so an ambient CI-mode switch cannot leak into a test.
+
+    A test that wants CI mode sets it explicitly, after this fixture has run.
+    """
+    monkeypatch.delenv("NEUROLOOM_MODE", raising=False)
+
+
+# test_workspace_config.py has an opt-in live smoke test whose collection-time
+# skipif checks NEUROLOOM_SLEEVED_API_KEY.  Drop the key at conftest import (before
+# any test module is collected) so that test skips instead of making a live network
+# call from a CI run.  NEUROLOOM_RUN_LIVE_SMOKE=1 is the explicit opt-in.
+if os.environ.get("NEUROLOOM_RUN_LIVE_SMOKE") != "1":
+    os.environ.pop("NEUROLOOM_SLEEVED_API_KEY", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip credential-shaped environment variables (KEY, TOKEN, SECRET, PASSWORD,
+    CREDENTIAL, BEARER in the name) so a developer's real secrets never reach a
+    hook under test.  A test that needs one sets it explicitly afterwards.
+    """
+    for name in ci_support.credential_env_names(os.environ):
+        if name == "NEUROLOOM_SLEEVED_API_KEY" and os.environ.get("NEUROLOOM_RUN_LIVE_SMOKE") == "1":
+            continue
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture()
+def black_hole() -> Iterator[ci_support.BlackHole]:
+    """A loopback listener that counts connections and never answers."""
+    hole = ci_support.BlackHole()
+    try:
+        yield hole
+    finally:
+        hole.close()
+
+
+@pytest.fixture()
+def ignored_git_repo(tmp_path: Path) -> Path:
+    """A git repository whose .gitignore covers ``.neuroloom.db*``."""
+    if not ci_support.git_available():
+        pytest.skip("git is not available")
+    return ci_support.make_ignored_git_repo(tmp_path / "ignored-repo")
+
+
+@pytest.fixture()
+def bait_repo(tmp_path: Path) -> ci_support.Bait:
+    """A repository an unsafe session_start would visibly change (see ci_support)."""
+    return ci_support.make_bait_repo(tmp_path / "bait")
+
+
+@pytest.fixture()
+def forbid() -> Iterator[ci_support.ForbidRecorder]:
+    """Forbid thread/subprocess/non-loopback network use for the whole test.
+
+    Prefer ``ci_support.forbid_side_effects()`` around ``main()`` only, so test
+    servers can start first; this fixture is for tests that need it throughout.
+    """
+    with ci_support.forbid_side_effects() as recorder:
+        yield recorder
 
 
 @pytest.fixture()
@@ -63,5 +130,4 @@ def mock_config(db_path: Path) -> _config_mod.Config:
         api_key="test-key-abc123",
         api_base="http://localhost:19999",
         state_db_path=db_path,
-        debug=False,
     )

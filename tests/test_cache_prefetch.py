@@ -4,10 +4,9 @@ Tests for hooks/cache_prefetch.py.
 Covers the no-API-key guard: without a per-project key, the prefetch hook
 must exit before opening the state DB at all -- mirroring
 test_capture.py::TestNoApiKey::test_exits_without_db_open's shape (D171
-Phase 3, round 5 "unchanged"), but WITHOUT copying its Config(...,
-debug=False) construction -- Config has no debug field; that pattern is a
-broken fixture causing most of this repo's pre-existing baseline failures
-(D171 plan, Migration & Compatibility Story / Baseline section).
+Phase 3, round 5 "unchanged"). (Historical note: the shared helper once passed
+a ``debug`` keyword that ``Config`` never had, which broke most of this repo's
+older tests; D178d Phase 1 removed it everywhere.)
 """
 
 import io
