@@ -17,7 +17,7 @@ Note: Every command below works from the project root, not the directory you are
 1a. **Workspace routing check (R2-6, network-free)**: Run this step **regardless of whether step 1 succeeded or failed** — it makes no MCP/API call of its own, so it is meaningful even when the connection check above just failed. This is what makes "runs independent of step 1's outcome" actually true rather than aspirational (see `compare_desired_vs_observed`'s own docstring in `pyhooks/workspace_config.py`).
 
    ```bash
-   CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+   CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
    from pathlib import Path
    import datetime
    import sqlite3

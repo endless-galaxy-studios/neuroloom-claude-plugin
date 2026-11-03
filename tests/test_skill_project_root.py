@@ -340,7 +340,7 @@ def test_every_python_snippet_is_prefixed_with_the_root_resolver() -> None:
     )
     for path in _SKILL_FILES:
         for line in path.read_text(encoding="utf-8").splitlines():
-            if line.rstrip().endswith('python -c "') and "subprocess" not in line:
+            if line.rstrip().endswith('-c "'):
                 assert prefix in line, f"{path.parent.name}: unprefixed snippet: {line.strip()}"
 
 
@@ -352,13 +352,10 @@ def _run_block(
 ) -> subprocess.CompletedProcess[str]:
     """Run a SKILL.md bash block as the agent would, from ``cwd``.
 
-    No PYTHONPATH: ``pyhooks`` must import the way the venv provides it (the
-    editable install), so a snippet that only works because the repo root was
-    injected cannot pass.  ``sys.executable`` stands in for the plugin venv.
+    The block runs verbatim through ``scripts/skill_python.py``, which resolves
+    the interpreter and PYTHONPATH exactly as hooks do.
     """
-    script = block.replace(
-        "${CLAUDE_PLUGIN_ROOT}/.venv/bin/python", str(Path(sys.executable))
-    )
+    script = block
     env = {
         "PATH": os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")]),
         "CLAUDE_PLUGIN_ROOT": str(_REPO_ROOT),

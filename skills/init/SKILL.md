@@ -16,7 +16,7 @@ Before anything else, ensure a Neuroloom API key is configured for this project.
 Run this Bash command to check whether this project already has its own dedicated API key configured (not whether any global/plugin-wide key exists):
 
 ```bash
-CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 from project_root import require_project_root
@@ -34,7 +34,7 @@ If the output is `KEY_SET`, skip to Phase 1 — the key is already configured *f
 If the key is missing, determine whether a global (seed) key is on file and how it resolves, then present the matching prompt below. Run:
 
 ```bash
-CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 from project_root import require_project_root
@@ -107,7 +107,7 @@ Which variant to run depends on how the user responded in Step 2.
 **Paste-path** (key passed via the `_NL_KEY` environment variable — do NOT echo the key to stdout):
 
 ```bash
-CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
 from pathlib import Path
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
@@ -129,7 +129,7 @@ else:
 **Use-default** (resolves the seed in-process via `load_global_seed_key()` — never through an env var or command-line argument, since it never leaves the process):
 
 ```bash
-CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
 from pyhooks.config import load_global_seed_key
 from pyhooks.db import open_db
 from pathlib import Path
@@ -189,7 +189,7 @@ If no per-project key resolved (Steps 2-4 ended in "skip" with no key ever store
 Otherwise, check whether this project already has an on-file workspace decision, so this step never silently re-decides one behind the user's back (NFR-DX-3):
 
 ```bash
-CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 from project_root import require_project_root
@@ -490,7 +490,7 @@ Seeding code graph...
 Use the Bash tool to invoke this wrapper, which resolves this project's dedicated API key and passes it to the seed script via the child process's environment only — never via stdout or the command line:
 
 ```bash
-CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python3 "${CLAUDE_PLUGIN_ROOT}/scripts/skill_python.py" -c "
 import os
 import subprocess
 import sys
@@ -508,7 +508,7 @@ env['_NL_KEY'] = api_key
 try:
     result = subprocess.run(
         [
-            '${CLAUDE_PLUGIN_ROOT}/.venv/bin/python',
+            sys.executable,
             '${CLAUDE_PLUGIN_ROOT}/scripts/seed_code_graph.py',
             '--workspace-root', str(project_root),
         ],
