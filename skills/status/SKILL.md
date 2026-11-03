@@ -5,7 +5,7 @@ description: Show Neuroloom memory engine status — what it knows, how many mem
 
 When the user runs this command, gather and present Neuroloom status. Execute steps in order — if step 1 fails, still run step 1a (it makes no network call of its own and is independent of step 1's outcome — see step 1a below), then stop early as step 1 indicates. Steps 2 onward only run when step 1 succeeded.
 
-Note: These paths are relative to your project root. Run `/neuroloom:status` from the directory where you launched `claude`.
+Note: Every command below works from the project root, not the directory you are in. `scripts/project_root.py` finds it (the project directory Claude Code substitutes into this skill, else `CLAUDE_PROJECT_DIR`, else the nearest parent directory holding a `.neuroloom.db`, else the nearest holding `.git`, else the current directory) and each command prints the root it picked, so a wrong pick is visible. Its marker search never selects `$HOME` or `/`. Project paths containing a double quote, a `$` or a backtick are not supported: the shell either errors or resolves a different directory (for example `w/app$1` can resolve to an existing `w/app`); the stderr line `neuroloom: project root chosen by <hint|env|db|git|cwd>` names the step that picked the root, and a rejected hint is reported as `ignoring hint`.
 
 1. **Connection check (authoritative)**: Call the `workspace_insight` tool from the `neuroloom` MCP server.
 
@@ -17,13 +17,16 @@ Note: These paths are relative to your project root. Run `/neuroloom:status` fro
 1a. **Workspace routing check (R2-6, network-free)**: Run this step **regardless of whether step 1 succeeded or failed** — it makes no MCP/API call of its own, so it is meaningful even when the connection check above just failed. This is what makes "runs independent of step 1's outcome" actually true rather than aspirational (see `compare_desired_vs_observed`'s own docstring in `pyhooks/workspace_config.py`).
 
    ```bash
-   ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+   CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
    from pathlib import Path
    import datetime
    import sqlite3
    from pyhooks.workspace_config import compare_desired_vs_observed, RoutingComparison, DesiredKind
 
-   project_root = Path.cwd()
+   import sys
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   from project_root import require_project_root
+   project_root = require_project_root()
    db_path = project_root / '.neuroloom.db'
    mcp_path = project_root / '.mcp.json'
 
@@ -74,17 +77,17 @@ Note: These paths are relative to your project root. Run `/neuroloom:status` fro
 
    This line is included in the structured summary below (Neuroloom Status block) even when step 1 failed — place it directly under the `Connection:` line.
 
-2. **Session info**: Query `.neuroloom.db` using the Bash tool:
+2. **Session info**: Query the project root's `.neuroloom.db` (path resolved by `scripts/project_root.py` with `python3`; it is the same root the hooks use; only if the substituted project directory is unavailable can a stray nested `.neuroloom.db` closer to your directory win, so check the printed root) using the Bash tool:
    ```bash
-   sqlite3 .neuroloom.db "SELECT session_id, started_at FROM sessions LIMIT 1;" 2>/dev/null || echo "No active session"
+   NL_ROOT="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")"; if [ -z "$NL_ROOT" ]; then echo "ROOT_UNRESOLVED: could not determine the project root" >&2; echo "ROOT_UNRESOLVED"; else echo "project root: $NL_ROOT" >&2; sqlite3 -readonly "$NL_ROOT/.neuroloom.db" "SELECT session_id, started_at FROM sessions LIMIT 1;" 2>/dev/null || echo "No active session"; fi
    ```
-   Show the session ID and when it started (use the `started_at` column).
+   Show the session ID and when it started (use the `started_at` column). If the output is `ROOT_UNRESOLVED`, report `Session: project root could not be determined` instead of "No active session".
 
 3. **Buffer health**: Count buffered events using the Bash tool:
    ```bash
-   sqlite3 .neuroloom.db "SELECT COUNT(*) FROM event_buffer;" 2>/dev/null || echo "0"
+   NL_ROOT="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")"; if [ -z "$NL_ROOT" ]; then echo "ROOT_UNRESOLVED: could not determine the project root" >&2; echo "ROOT_UNRESOLVED"; else echo "project root: $NL_ROOT" >&2; sqlite3 -readonly "$NL_ROOT/.neuroloom.db" "SELECT COUNT(*) FROM event_buffer;" 2>/dev/null || echo "0"; fi
    ```
-   Report the number of events waiting to be flushed.
+   Report the number of events waiting to be flushed. If the output is `ROOT_UNRESOLVED`, report `Buffer: project root could not be determined` instead of a count.
 
 4. **Plugin version**: Read the version from the plugin manifest:
    ```bash

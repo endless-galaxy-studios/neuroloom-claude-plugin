@@ -16,7 +16,11 @@ Before anything else, ensure a Neuroloom API key is configured for this project.
 Run this Bash command to check whether this project already has its own dedicated API key configured (not whether any global/plugin-wide key exists):
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+require_project_root()
 import pyhooks.config as _config
 cfg = _config.load()
 print('KEY_SET' if cfg.api_key_source == 'project' else 'KEY_MISSING')
@@ -30,7 +34,11 @@ If the output is `KEY_SET`, skip to Phase 1 — the key is already configured *f
 If the key is missing, determine whether a global (seed) key is on file and how it resolves, then present the matching prompt below. Run:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+require_project_root()
 import pyhooks.config as _config
 from pyhooks.workspace_config import fetch_workspace_id_from_api, WorkspaceFetchStatus
 
@@ -99,12 +107,15 @@ Which variant to run depends on how the user responded in Step 2.
 **Paste-path** (key passed via the `_NL_KEY` environment variable — do NOT echo the key to stdout):
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pathlib import Path
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
 from pyhooks.db import open_db
 import os
 
-conn = open_db(Path('.neuroloom.db'))
+conn = open_db(require_project_root() / '.neuroloom.db')
 if conn is None:
     print('failed')
 else:
@@ -118,16 +129,19 @@ else:
 **Use-default** (resolves the seed in-process via `load_global_seed_key()` — never through an env var or command-line argument, since it never leaves the process):
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pyhooks.config import load_global_seed_key
 from pyhooks.db import open_db
 from pathlib import Path
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
 
 seed_key = load_global_seed_key()
 if not seed_key:
     print('failed:no_seed')
 else:
-    conn = open_db(Path('.neuroloom.db'))
+    conn = open_db(require_project_root() / '.neuroloom.db')
     if conn is None:
         print('failed')
     else:
@@ -175,13 +189,17 @@ If no per-project key resolved (Steps 2-4 ended in "skip" with no key ever store
 Otherwise, check whether this project already has an on-file workspace decision, so this step never silently re-decides one behind the user's back (NFR-DX-3):
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 from pathlib import Path
 import pyhooks.config as _config
 from pyhooks.workspace_config import read_desired_state, DesiredKind, verify_target_workspace_exists, WorkspaceExistenceStatus
 
 cfg = _config.load()
-db_path = Path.cwd() / '.neuroloom.db'
+db_path = require_project_root() / '.neuroloom.db'
 desired = read_desired_state(db_path)
 print('desired_kind:' + desired.kind.name)
 if desired.kind == DesiredKind.SET_TO_VALUE and desired.value:
@@ -204,7 +222,7 @@ This step ensures a project-scope `.mcp.json` "neuroloom" entry exists that this
 
 **Step 1: Map the directory tree.**
 
-Use the Glob tool with these depth-limited patterns in sequence:
+First resolve the project root with the Bash tool: `NL_ROOT="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")"; [ -n "$NL_ROOT" ] && echo "$NL_ROOT"`. If it prints nothing, stop and tell the user the project root could not be determined. Otherwise pass the printed path as the Glob tool's `path` parameter for every pattern below, so the crawl covers the project root rather than the subdirectory you happen to be in. Use these depth-limited patterns in sequence:
 - `*` — top-level entries
 - `*/*` — one level deep
 - `*/*/*` — two levels deep
@@ -472,14 +490,16 @@ Seeding code graph...
 Use the Bash tool to invoke this wrapper, which resolves this project's dedicated API key and passes it to the seed script via the child process's environment only — never via stdout or the command line:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 import os
 import subprocess
 import sys
 from pathlib import Path
 from pyhooks.config import load_project_api_key
 
-project_root = Path('{cwd}')
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 api_key = load_project_api_key(project_root)
 
 env = dict(os.environ)
@@ -502,7 +522,7 @@ except subprocess.TimeoutExpired:
 "
 ```
 
-Replace `{cwd}` with the actual working directory path, matching this step's existing `{cwd}` substitution convention. Use `${CLAUDE_PLUGIN_ROOT}` literally — do not use Glob to discover the script path. `api_key` is never printed — it only ever exists as a Python string passed via `env=`. If `.neuroloom.db` has no `api_key` row, `load_project_api_key` returns `""`, and the script correctly prints `code-graph: failed (missing API key)` and exits 1 — handled the same as any other `failed` status below.
+The project root comes from the shell prefix `CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")"` read back by `require_project_root()` (the project directory Claude Code substitutes for `${CLAUDE_PROJECT_DIR}` first, then the `CLAUDE_PROJECT_DIR` environment variable if it is set to a directory, else the nearest parent directory holding a `.neuroloom.db`, else the nearest holding `.git`, else the current directory), so the root is the same one the hooks use, and a fresh project with no database yet resolves to its git root. Project paths containing a double quote, a `$` or a backtick are not supported: the shell either errors or resolves a different directory (for example `w/app$1` can resolve to an existing `w/app`); the stderr line `neuroloom: project root chosen by <hint|env|db|git|cwd>` names the step that picked the root, and a rejected hint is reported as `ignoring hint`. Use `${CLAUDE_PLUGIN_ROOT}` literally — do not use Glob to discover the script path. `api_key` is never printed — it only ever exists as a Python string passed via `env=`. If `.neuroloom.db` has no `api_key` row, `load_project_api_key` returns `""`, and the script correctly prints `code-graph: failed (missing API key)` and exits 1 — handled the same as any other `failed` status below.
 
 Capture the single structured status line printed to stdout.
 

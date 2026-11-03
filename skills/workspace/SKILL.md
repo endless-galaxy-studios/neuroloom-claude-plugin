@@ -53,7 +53,7 @@ context for whoever maintains this file next):
 
 You are executing the Neuroloom workspace-routing command. This project's `.mcp.json` "neuroloom" connection routes every MCP tool call to a specific workspace; this command inventories that routing, lets the human set/change/clear it, and — where an entry exists that this plugin didn't create — offers explicit-consent adoption. Every state-changing step ends with the restart-honesty disclosure (below) before returning to the main menu or exiting.
 
-Run all Bash commands from the project root (`Path.cwd()` in the snippets below is the directory the user launched `claude` from).
+Every snippet below runs as `CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" <python> -c ...`: the root is resolved once by `scripts/project_root.py` (the project directory Claude Code substitutes into this skill as `${CLAUDE_PROJECT_DIR}`, else the `CLAUDE_PROJECT_DIR` environment variable, else the nearest parent directory holding a `.neuroloom.db`, else the nearest holding `.git`, else the current directory; the marker search never selects `$HOME` or `/`) and handed to Python as `CLAUDE_PROJECT_DIR`, the variable the hooks use. `_config.load()`, `cfg.state_db_path` and the snippet's own `require_project_root()` therefore all agree, so this command reads and writes the same `.neuroloom.db` and `.mcp.json` as the hooks even after a `cd` into a subdirectory. Each snippet prints `neuroloom: project root is <path>` on stderr; check it. `CLAUDE_PROJECT_DIR` is only set for hooks, not for these Bash commands, which is why the shell prefix exists. If the resolver prints nothing, the snippet aborts with `could not determine the project root`; stop and tell the user. Project paths containing a double quote, a `$` or a backtick are not supported: the shell either errors or resolves a different directory (for example `w/app$1` can resolve to an existing `w/app`); the stderr line `neuroloom: project root chosen by <hint|env|db|git|cwd>` names the step that picked the root, and a rejected hint is reported as `ignoring hint`.
 
 ---
 
@@ -62,7 +62,11 @@ Run all Bash commands from the project root (`Path.cwd()` in the snippets below 
 **Step 1: Check whether this project has its own dedicated key.**
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+require_project_root()
 import pyhooks.config as _config
 cfg = _config.load()
 print('KEY_SET' if cfg.api_key_source == 'project' else 'KEY_MISSING')
@@ -77,7 +81,11 @@ print('KEY_SET' if cfg.api_key_source == 'project' else 'KEY_MISSING')
 Determine whether a global seed key is on file and how it resolves — identical check to `skills/init/SKILL.md`'s Phase 0 Step 2:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+require_project_root()
 import pyhooks.config as _config
 from pyhooks.workspace_config import fetch_workspace_id_from_api, WorkspaceFetchStatus
 
@@ -137,7 +145,11 @@ No per-project key configured for this project yet, and no default
 ### Step 3 — Resolvability check on the stored key (FR-2)
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+require_project_root()
 from pathlib import Path
 import pyhooks.config as _config
 from pyhooks.workspace_config import check_resolvability, Resolvability
@@ -188,7 +200,11 @@ No changes have been made yet. This project has a stored API key, but it isn't r
 **Step 1: Full inventory (single call, FR-1).**
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 from pathlib import Path
 import pyhooks.config as _config
 from pyhooks.workspace_config import (
@@ -197,7 +213,6 @@ from pyhooks.workspace_config import (
 )
 
 cfg = _config.load()
-project_root = Path.cwd()
 db_path = project_root / '.neuroloom.db'
 inv = inventory_workspace_state(str(project_root), db_path, cfg.api_base, cfg.api_key)
 
@@ -211,7 +226,7 @@ else:
     print('observed_value:' + (inv.observed.value or ''))
     # Phase 2 Step 2's S7/S7-suppressed branch needs this flag — the
     # pinned WorkspaceInventory shape doesn't carry it, so it is computed
-    # here, once, off the same `inv.observed` the rest of Phase 2 uses.
+    # here, once, off the same inv.observed value the rest of Phase 2 uses.
     if inv.ownership is Ownership.UNOWNED and inv.observed.kind is not ObservedKind.ABSENT:
         print('resurface_adoption_offer:' + str(should_resurface_adoption_offer(db_path, inv.observed)))
     if inv.ownership is Ownership.OWNED and inv.observed.kind is not ObservedKind.ABSENT:
@@ -243,13 +258,16 @@ This project has an older-style workspace setting in .claude/settings.json: <uui
 - **"yes"** → run migration (note: `migrate_settings_json_override` itself only re-checks the *key's* general resolvability — `check_resolvability` — not whether `legacy_value` specifically still exists; per that function's own docstring, layering the specific-workspace existence check on top for the MIGRATE-FAILED reason string is this phase's job, done below when the outcome is `VERIFY_FAILED`):
 
   ```bash
-  ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+  CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+  import sys
+  sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+  from project_root import require_project_root
+  project_root = require_project_root()
   from pathlib import Path
   import pyhooks.config as _config
   from pyhooks.workspace_config import migrate_settings_json_override, MigrationOutcome, verify_target_workspace_exists, WorkspaceExistenceStatus
 
   cfg = _config.load()
-  project_root = Path.cwd()
   db_path = project_root / '.neuroloom.db'
   legacy_value = '{legacy_value}'  # the exact value already read and shown in Phase 1 Step 1/2's S9 prompt
   result = migrate_settings_json_override(str(project_root), db_path, cfg.api_base, cfg.api_key)
@@ -286,10 +304,12 @@ This project has an older-style workspace setting in .claude/settings.json: <uui
 - **"no"** → call:
 
   ```bash
-  ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
-  from pathlib import Path
+  CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+  import sys
+  sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+  from project_root import require_project_root
   from pyhooks.workspace_config import decline_settings_json_migration
-  decline_settings_json_migration(Path.cwd() / '.neuroloom.db')
+  decline_settings_json_migration(require_project_root() / '.neuroloom.db')
   "
   ```
 
@@ -348,7 +368,11 @@ Prompt: *"Enter the workspace ID (uuid) this project should route to."*
 On receiving a candidate `target_workspace_id`, verify it exists and resolve its name. Pass `target_workspace_id` via the `_NL_TARGET_WORKSPACE_ID` environment variable when invoking this snippet (same convention as `skills/init/SKILL.md`'s `_NL_KEY` pattern) rather than interpolating raw human input into the `python -c` payload string:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+require_project_root()
 import os
 import pyhooks.config as _config
 from pyhooks.workspace_config import verify_target_workspace_exists, WorkspaceExistenceStatus
@@ -368,12 +392,15 @@ print('name:' + (result.name or ''))
 **Write step** (on `FOUND`), again passing `target_workspace_id` via `_NL_TARGET_WORKSPACE_ID` rather than string interpolation:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 import os
 from pathlib import Path
 from pyhooks.workspace_config import write_desired_state, reconcile, DesiredState, DesiredKind, WriteResult
 
-project_root = Path.cwd()
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 db_path = project_root / '.neuroloom.db'
 target_workspace_id = os.environ['_NL_TARGET_WORKSPACE_ID']
 write_desired_state(db_path, DesiredState(DesiredKind.SET_TO_VALUE, target_workspace_id))
@@ -397,11 +424,14 @@ Confirm: *"Clear this project's workspace override? It will auto-resolve its wor
 - **yes** →
 
   ```bash
-  ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+  CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
   from pathlib import Path
   from pyhooks.workspace_config import write_desired_state, reconcile, DesiredState, DesiredKind
 
-  project_root = Path.cwd()
+  import sys
+  sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+  from project_root import require_project_root
+  project_root = require_project_root()
   db_path = project_root / '.neuroloom.db'
   write_desired_state(db_path, DesiredState(DesiredKind.EXPLICITLY_CLEARED))
   outcome = reconcile(str(project_root), db_path, DesiredState(DesiredKind.EXPLICITLY_CLEARED))
@@ -421,13 +451,16 @@ Confirm: *"Clear this project's workspace override? It will auto-resolve its wor
 Re-read the current observed state fresh immediately before presenting this prompt (never reuse a value read earlier in this run, to keep the TOCTOU window as tight as possible). **Capture this snippet's `kind:`/`value:` output** — this is the exact state that gets shown to and confirmed by the human below; it must be threaded forward, verbatim, into whichever choice snippet the human picks. Pass it via the `_NL_CONFIRMED_KIND`/`_NL_CONFIRMED_VALUE` environment variables when invoking whichever choice snippet the human picks (same convention as `_NL_TARGET_WORKSPACE_ID`), rather than interpolating the raw, unvalidated header value into the `python -c` payload string — unlike `{legacy_value}` in Phase 1 Step 2 (which is UUID-validated before substitution), this value comes straight from `.mcp.json` and could otherwise be a code-injection vector. Do **not** re-derive it with a fresh `read_observed_state` call inside the choice snippets below — that would compare a just-read state against another just-read state taken moments later, not against what the human actually saw and approved.
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 from pathlib import Path
 import pyhooks.config as _config
 from pyhooks.workspace_config import read_observed_state, verify_target_workspace_exists, ObservedKind
 
 cfg = _config.load()
-project_root = Path.cwd()
 observed = read_observed_state(str(project_root))
 print('kind:' + observed.kind.name)
 print('value:' + (observed.value or ''))
@@ -457,11 +490,14 @@ Substitute `<uuid | none>` from `value`; substitute the "Resolves to" line from 
 **Choice 1 — Adopt as-is:**
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pathlib import Path
 from pyhooks.workspace_config import adopt_unowned_entry, confirmed_state_from_env, AdoptionChoice, AdoptionOutcome
 
-project_root = Path.cwd()
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 db_path = project_root / '.neuroloom.db'
 # confirmed_state_from_env() reconstructs, from _NL_CONFIRMED_KIND/
 # _NL_CONFIRMED_VALUE, the exact kind/value printed by the display
@@ -485,12 +521,15 @@ print('outcome:' + result.outcome.name)
 **Choice 2 — Adopt and change:** prompt for a target workspace id and verify it exists using the identical FOUND/NOT_FOUND/SCAN_TRUNCATED/UNREACHABLE handling as Phase 3's write step (same verbatim S10/scan-truncated copy, same `_NL_TARGET_WORKSPACE_ID` env-var passing convention). On `FOUND`, call `adopt_unowned_entry` with `AdoptionChoice.ADOPT_AND_CHANGE`, `desired_value=target_workspace_id`, and the same `confirmed_state_from_env()`-reconstructed `confirmed` argument as Choice 1 (the state captured from the display snippet at the top of this phase, threaded via `_NL_CONFIRMED_KIND`/`_NL_CONFIRMED_VALUE` — not a fresh read):
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 import os
 from pathlib import Path
 from pyhooks.workspace_config import adopt_unowned_entry, confirmed_state_from_env, AdoptionChoice, AdoptionOutcome
 
-project_root = Path.cwd()
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 db_path = project_root / '.neuroloom.db'
 confirmed = confirmed_state_from_env()
 target_workspace_id = os.environ['_NL_TARGET_WORKSPACE_ID']
@@ -506,11 +545,14 @@ Interpret `outcome` identically to Choice 1 above, except `ADOPTED` here always 
 **Choice 3 — Leave unowned:**
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
+CLAUDE_PROJECT_DIR="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_root.py" "${CLAUDE_PROJECT_DIR}")" ${CLAUDE_PLUGIN_ROOT}/.venv/bin/python -c "
 from pathlib import Path
 from pyhooks.workspace_config import adopt_unowned_entry, confirmed_state_from_env, AdoptionChoice
 
-project_root = Path.cwd()
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from project_root import require_project_root
+project_root = require_project_root()
 db_path = project_root / '.neuroloom.db'
 # Same threaded state as Choice 1/2, via confirmed_state_from_env() — the
 # state shown to and declined by the human, not a fresh read (same

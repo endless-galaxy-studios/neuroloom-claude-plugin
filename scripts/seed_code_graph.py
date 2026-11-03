@@ -42,6 +42,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_root import resolve_project_root  # type: ignore[import-not-found,unused-ignore]  # noqa: E402
+
 
 def _resolve_config() -> tuple[str, str]:
     """Return (api_key, api_base) from the environment.
@@ -75,7 +78,11 @@ def main() -> None:
     parser.add_argument(
         "--workspace-root",
         default=None,
-        help="Root directory of the workspace. Defaults to the current working directory.",
+        help=(
+            "Root directory of the workspace. Defaults to the project root "
+            "(CLAUDE_PROJECT_DIR, else the nearest parent holding .neuroloom.db, "
+            "else the nearest holding .git, else the current directory)."
+        ),
     )
     parser.add_argument(
         "paths",
@@ -84,7 +91,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = Path(args.workspace_root).resolve() if args.workspace_root else Path.cwd().resolve()
+    resolved_root = Path(args.workspace_root).resolve() if args.workspace_root else resolve_project_root()
+    if resolved_root is None:
+        print("code-graph: failed (cannot determine project root)")
+        sys.exit(1)
+    root = resolved_root
 
     # Graceful skip if codeweaver is not installed
     try:
